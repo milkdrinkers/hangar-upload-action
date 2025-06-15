@@ -1,131 +1,73 @@
-import core from "@actions/core";
-import FormData from "form-data";
-import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
-import { glob } from "fast-glob";
+import * as core from "@actions/core";
+import { Logger } from "./logger.js";
+import { InputParser } from "./input-parser.js";
+import { FileProcessor } from "./file-processor.js";
+import { HangarClient } from "./hangar-client.js";
+import { VersionUpload, HangarError } from "./types.js";
 
-interface FileInput {
-  path: string;
-  url: string;
-  externalUrl: string;
-  platforms: HangarPlatform[];
-}
+async function main(): Promise<void> {
+  const logger = new Logger();
 
-await main().catch((err) => {
-  core.error(`Failed with error: ${err}`);
-  core.setFailed(err.message);
-});
+  try {
+    logger.info("Starting Hangar upload action");
 
-type HangarPlatform = "PAPER" | "WATERFALL" | "VELOCITY";
-interface HangarFile {
-  platforms: HangarPlatform[];
-  url?: boolean;
-  externalUrl?: string;
-}
+    const inputParser = new InputParser(logger);
+    const inputs = inputParser.parseInputs();
 
-async function main() {
-  const apiToken = core.getInput("api_token", { required: true });
-  const slug = core.getInput("slug", { required: true });
-  const version = core.getInput("version", { required: true });
-  const channel = core.getInput("channel", { required: true });
-  const files = core.getInput("files", { required: true });
-  const description = core.getInput("description");
-  const pluginDependencies = core.getInput("plugin_dependencies");
-  const platformDependencies = core.getInput("platform_dependencies");
+    logger.info(
+      `Uploading version ${inputs.version} to project ${inputs.slug} on channel ${inputs.channel}`,
+    );
 
-  const form = new FormData();
+    const fileProcessor = new FileProcessor(logger);
+    const { form, filesData } = await fileProcessor.processFiles(inputs.files);
 
-  const fileEntries: FileInput[] = JSON.parse(files);
+    const versionUpload: VersionUpload = {
+      version: inputs.version,
+      channel: inputs.channel,
+      description: inputs.description,
+      files: filesData,
+      pluginDependencies: inputs.pluginDependencies,
+      platformDependencies: inputs.platformDependencies,
+    };
 
-  const filesData: HangarFile[] = [];
+    logger.debug("Version upload payload", versionUpload);
 
-  for (const file of fileEntries) {
-    if (file.path) {
-      const foundFiles = await glob(file.path);
-      for (const filePath in foundFiles) {
-        form.append("files", fs.createReadStream(filePath), {
-          contentType: "application/x-binary",
-          filename: path.basename(filePath),
-        });
-        filesData.push({ platforms: file.platforms });
+    const hangarClient = new HangarClient(logger);
+
+    const token = await hangarClient.authenticate(inputs.apiToken, inputs.slug);
+
+    const uploadResult = await hangarClient.uploadVersion(
+      inputs.slug,
+      token,
+      form,
+      versionUpload,
+    );
+
+    core.setOutput("upload_url", uploadResult.url);
+    logger.info(`Upload completed successfully! URL: ${uploadResult.url}`);
+  } catch (error) {
+    if (error instanceof HangarError) {
+      logger.error(`Hangar API error (${error.statusCode}): ${error.message}`);
+      if (error.responseBody) {
+        logger.debug("API response body", error.responseBody);
       }
-    } else if (file.url && file.externalUrl) {
-      filesData.push({
-        platforms: file.platforms,
-        url: true,
-        externalUrl: file.externalUrl,
-      });
+    } else if (error instanceof Error) {
+      logger.error(`Action failed: ${error.message}`);
+      logger.debug("Error stack", error.stack);
     } else {
-      core.setFailed(`Invalid file data: ${JSON.stringify(file)}`);
-      process.exit(1);
+      logger.error("Unknown error occurred", error);
     }
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    core.setFailed(errorMessage);
+    process.exit(1);
   }
-
-  const versionUpload = {
-    version,
-    channel,
-    description,
-    files: filesData,
-    pluginDependencies: JSON.parse(pluginDependencies),
-    platformDependencies: JSON.parse(platformDependencies),
-  };
-
-  core.info(JSON.stringify(versionUpload));
-
-  form.append("versionUpload", JSON.stringify(versionUpload), {
-    contentType: "application/json",
-  });
-
-  interface RestAuthenticateResponce {
-    expiresIn: number;
-    token: string;
-  }
-
-  const token = await fetch(
-    `https://hangar.papermc.io/api/v1/authenticate?apiKey=${apiToken}`,
-    {
-      method: "POST",
-      headers: {
-        "User-Agent": `hangar-upload-action; ${slug};`,
-      },
-    },
-  )
-    .then(async (res) => {
-      if (!res.ok) {
-        core.setFailed(
-          `Failed to authenticate: ${res.statusText} ${await res.text()}`,
-        );
-        process.exit(1);
-      }
-      return (await res.json()) as RestAuthenticateResponce;
-    })
-    .then((data) => data.token);
-
-  core.info("Successfully authenticated!");
-
-  interface RestUploadResponce {
-    url: string;
-  }
-
-  const resp = await fetch(
-    `https://hangar.papermc.io/api/v1/projects/${slug}/upload`,
-    {
-      method: "POST",
-      headers: {
-        "User-Agent": `hangar-upload-action; ${slug};`,
-        Authorization: token,
-        ...form.getHeaders(),
-      },
-      body: form,
-    },
-  ).then(async (res) => {
-    if (!res.ok) {
-      core.setFailed(`Failed to upload: ${res.statusText} ${await res.text()}`);
-      process.exit(1);
-    }
-    return (await res.json()) as RestUploadResponce;
-  });
-
-  core.info(JSON.stringify(resp));
 }
+
+await main().catch((error) => {
+  const logger = new Logger();
+  logger.error("Unhandled error in main function", error);
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  core.setFailed(errorMessage);
+  process.exit(1);
+});
