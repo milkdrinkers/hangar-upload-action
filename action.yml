@@ -1,5 +1,5 @@
 name: 'Hangar Upload Action'
-description: 'Upload minecraft plugin to hangar.papermc.io with github actions!'
+description: 'Upload Minecraft plugins to Hangar (PaperMC) with comprehensive file and dependency management'
 
 branding:
   icon: 'upload'
@@ -7,32 +7,67 @@ branding:
 
 inputs:
   api_token:
-    description: 'Hangar API Token'
+    description: 'Hangar API token for authentication (generate from your Hangar profile settings)'
     required: true
+
   slug:
-    description: 'Plugin Name'
+    description: 'Project slug/identifier on Hangar (e.g., "my-awesome-plugin")'
     required: true
+
   version:
-    description: 'Plugin Version'
+    description: 'Plugin version string (e.g., "1.0.0", "2.1.3-SNAPSHOT")'
     required: true
+
   channel:
-    description: 'Channel type of the release'
+    description: 'Release channel type (e.g., "Release", "Beta", "Alpha", "Snapshot")'
     required: true
+
   files:
-    description: 'Files to upload'
+    description: |
+      JSON array of files to upload. Each file must specify:
+      - platforms: Array of ["PAPER", "VELOCITY", "WATERFALL"]
+      - Either: path (glob pattern for local files) OR url + externalUrl for external files
+      
+      Example:
+      [
+        {
+          "path": "build/libs/*.jar",
+          "platforms": ["PAPER"]
+        },
+        {
+          "path": "**/build/libs/!(*-sources|*-javadoc).jar",
+          "platforms": ["VELOCITY"]
+        },
+        {
+          "url": true,
+          "externalUrl": "https://example.com/plugin.jar",
+          "platforms": ["PAPER", "VELOCITY"]
+        }
+      ]
     required: true
+
   description:
-    description: 'Release description'
+    description: 'Markdown-formatted release description/changelog'
     required: false
     default: ''
+
   plugin_dependencies:
-    description: 'Plugin dependencies'
+    description: |
+      JSON object mapping plugin names to version ranges
+      Example: {"WorldEdit": "7.2.15", "Vault": "1.7.3"}
     required: false
     default: '{}'
+
   platform_dependencies:
-    description: 'Platform dependencies'
+    description: |
+      JSON object mapping platform names to version arrays
+      Example: {"PAPER": ["1.19", "1.20"], "VELOCITY": ["3.0.0"]}
     required: false
     default: '{}'
+
+outputs:
+  upload_url:
+    description: 'Direct URL to the uploaded version page on Hangar'
 
 runs:
   using: 'node20'
