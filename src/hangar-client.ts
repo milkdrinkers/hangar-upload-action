@@ -25,7 +25,7 @@ export class HangarClient {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          "User-Agent": `hangar-upload-action; ${slug};`,
+          "User-Agent": `hangar-publish; ${slug};`,
         },
       });
 
@@ -96,7 +96,7 @@ export class HangarClient {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          "User-Agent": `hangar-upload-action; ${slug};`,
+          "User-Agent": `hangar-publish; ${slug};`,
           Authorization: token,
           ...form.getHeaders(),
         },
