@@ -1,0 +1,25 @@
+name: Update major version tag
+
+on:
+  push:
+    tags:
+      - 'v1.*'  # Triggers on new v1.x tags
+
+jobs:
+  update_tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Allows updating tags
+
+    steps:
+      - name: Update v1 tag to new release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.git.updateRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/v1',  # Target the v1 tag
+              sha: context.sha,     # SHA of the newly pushed tag
+              force: true            # Overwrite existing v1 tag
+            })
