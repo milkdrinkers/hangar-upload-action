@@ -24,6 +24,7 @@ inputs:
   description:
     description: 'Release description'
     required: false
+    default: ''
   plugin_dependencies:
     description: 'Plugin dependencies'
     required: false
