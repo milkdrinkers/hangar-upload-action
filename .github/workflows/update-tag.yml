@@ -19,7 +19,7 @@ jobs:
             await github.rest.git.updateRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: 'refs/tags/v1',  # Target the v1 tag
-              sha: context.sha,     # SHA of the newly pushed tag
-              force: true            # Overwrite existing v1 tag
+              ref: 'refs/tags/v1',        // Target the v1 tag
+              sha: context.sha,           // SHA of the newly pushed tag
+              force: true                 // Overwrite existing v1 tag
             })
