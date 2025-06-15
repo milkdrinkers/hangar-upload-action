@@ -12642,6 +12642,2657 @@ function runParallel (tasks, cb) {
 
 /***/ }),
 
+/***/ 863:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const ANY = Symbol('SemVer ANY')
+// hoisted class for cyclic dependency
+class Comparator {
+  static get ANY () {
+    return ANY
+  }
+
+  constructor (comp, options) {
+    options = parseOptions(options)
+
+    if (comp instanceof Comparator) {
+      if (comp.loose === !!options.loose) {
+        return comp
+      } else {
+        comp = comp.value
+      }
+    }
+
+    comp = comp.trim().split(/\s+/).join(' ')
+    debug('comparator', comp, options)
+    this.options = options
+    this.loose = !!options.loose
+    this.parse(comp)
+
+    if (this.semver === ANY) {
+      this.value = ''
+    } else {
+      this.value = this.operator + this.semver.version
+    }
+
+    debug('comp', this)
+  }
+
+  parse (comp) {
+    const r = this.options.loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+    const m = comp.match(r)
+
+    if (!m) {
+      throw new TypeError(`Invalid comparator: ${comp}`)
+    }
+
+    this.operator = m[1] !== undefined ? m[1] : ''
+    if (this.operator === '=') {
+      this.operator = ''
+    }
+
+    // if it literally is just '>' or '' then allow anything.
+    if (!m[2]) {
+      this.semver = ANY
+    } else {
+      this.semver = new SemVer(m[2], this.options.loose)
+    }
+  }
+
+  toString () {
+    return this.value
+  }
+
+  test (version) {
+    debug('Comparator.test', version, this.options.loose)
+
+    if (this.semver === ANY || version === ANY) {
+      return true
+    }
+
+    if (typeof version === 'string') {
+      try {
+        version = new SemVer(version, this.options)
+      } catch (er) {
+        return false
+      }
+    }
+
+    return cmp(version, this.operator, this.semver, this.options)
+  }
+
+  intersects (comp, options) {
+    if (!(comp instanceof Comparator)) {
+      throw new TypeError('a Comparator is required')
+    }
+
+    if (this.operator === '') {
+      if (this.value === '') {
+        return true
+      }
+      return new Range(comp.value, options).test(this.value)
+    } else if (comp.operator === '') {
+      if (comp.value === '') {
+        return true
+      }
+      return new Range(this.value, options).test(comp.semver)
+    }
+
+    options = parseOptions(options)
+
+    // Special cases where nothing can possibly be lower
+    if (options.includePrerelease &&
+      (this.value === '<0.0.0-0' || comp.value === '<0.0.0-0')) {
+      return false
+    }
+    if (!options.includePrerelease &&
+      (this.value.startsWith('<0.0.0') || comp.value.startsWith('<0.0.0'))) {
+      return false
+    }
+
+    // Same direction increasing (> or >=)
+    if (this.operator.startsWith('>') && comp.operator.startsWith('>')) {
+      return true
+    }
+    // Same direction decreasing (< or <=)
+    if (this.operator.startsWith('<') && comp.operator.startsWith('<')) {
+      return true
+    }
+    // same SemVer and both sides are inclusive (<= or >=)
+    if (
+      (this.semver.version === comp.semver.version) &&
+      this.operator.includes('=') && comp.operator.includes('=')) {
+      return true
+    }
+    // opposite directions less than
+    if (cmp(this.semver, '<', comp.semver, options) &&
+      this.operator.startsWith('>') && comp.operator.startsWith('<')) {
+      return true
+    }
+    // opposite directions greater than
+    if (cmp(this.semver, '>', comp.semver, options) &&
+      this.operator.startsWith('<') && comp.operator.startsWith('>')) {
+      return true
+    }
+    return false
+  }
+}
+
+module.exports = Comparator
+
+const parseOptions = __nccwpck_require__(2600)
+const { safeRe: re, t } = __nccwpck_require__(6211)
+const cmp = __nccwpck_require__(5618)
+const debug = __nccwpck_require__(7611)
+const SemVer = __nccwpck_require__(4839)
+const Range = __nccwpck_require__(6093)
+
+
+/***/ }),
+
+/***/ 6093:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SPACE_CHARACTERS = /\s+/g
+
+// hoisted class for cyclic dependency
+class Range {
+  constructor (range, options) {
+    options = parseOptions(options)
+
+    if (range instanceof Range) {
+      if (
+        range.loose === !!options.loose &&
+        range.includePrerelease === !!options.includePrerelease
+      ) {
+        return range
+      } else {
+        return new Range(range.raw, options)
+      }
+    }
+
+    if (range instanceof Comparator) {
+      // just put it in the set and return
+      this.raw = range.value
+      this.set = [[range]]
+      this.formatted = undefined
+      return this
+    }
+
+    this.options = options
+    this.loose = !!options.loose
+    this.includePrerelease = !!options.includePrerelease
+
+    // First reduce all whitespace as much as possible so we do not have to rely
+    // on potentially slow regexes like \s*. This is then stored and used for
+    // future error messages as well.
+    this.raw = range.trim().replace(SPACE_CHARACTERS, ' ')
+
+    // First, split on ||
+    this.set = this.raw
+      .split('||')
+      // map the range to a 2d array of comparators
+      .map(r => this.parseRange(r.trim()))
+      // throw out any comparator lists that are empty
+      // this generally means that it was not a valid range, which is allowed
+      // in loose mode, but will still throw if the WHOLE range is invalid.
+      .filter(c => c.length)
+
+    if (!this.set.length) {
+      throw new TypeError(`Invalid SemVer Range: ${this.raw}`)
+    }
+
+    // if we have any that are not the null set, throw out null sets.
+    if (this.set.length > 1) {
+      // keep the first one, in case they're all null sets
+      const first = this.set[0]
+      this.set = this.set.filter(c => !isNullSet(c[0]))
+      if (this.set.length === 0) {
+        this.set = [first]
+      } else if (this.set.length > 1) {
+        // if we have any that are *, then the range is just *
+        for (const c of this.set) {
+          if (c.length === 1 && isAny(c[0])) {
+            this.set = [c]
+            break
+          }
+        }
+      }
+    }
+
+    this.formatted = undefined
+  }
+
+  get range () {
+    if (this.formatted === undefined) {
+      this.formatted = ''
+      for (let i = 0; i < this.set.length; i++) {
+        if (i > 0) {
+          this.formatted += '||'
+        }
+        const comps = this.set[i]
+        for (let k = 0; k < comps.length; k++) {
+          if (k > 0) {
+            this.formatted += ' '
+          }
+          this.formatted += comps[k].toString().trim()
+        }
+      }
+    }
+    return this.formatted
+  }
+
+  format () {
+    return this.range
+  }
+
+  toString () {
+    return this.range
+  }
+
+  parseRange (range) {
+    // memoize range parsing for performance.
+    // this is a very hot path, and fully deterministic.
+    const memoOpts =
+      (this.options.includePrerelease && FLAG_INCLUDE_PRERELEASE) |
+      (this.options.loose && FLAG_LOOSE)
+    const memoKey = memoOpts + ':' + range
+    const cached = cache.get(memoKey)
+    if (cached) {
+      return cached
+    }
+
+    const loose = this.options.loose
+    // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
+    const hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
+    range = range.replace(hr, hyphenReplace(this.options.includePrerelease))
+    debug('hyphen replace', range)
+
+    // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
+    range = range.replace(re[t.COMPARATORTRIM], comparatorTrimReplace)
+    debug('comparator trim', range)
+
+    // `~ 1.2.3` => `~1.2.3`
+    range = range.replace(re[t.TILDETRIM], tildeTrimReplace)
+    debug('tilde trim', range)
+
+    // `^ 1.2.3` => `^1.2.3`
+    range = range.replace(re[t.CARETTRIM], caretTrimReplace)
+    debug('caret trim', range)
+
+    // At this point, the range is completely trimmed and
+    // ready to be split into comparators.
+
+    let rangeList = range
+      .split(' ')
+      .map(comp => parseComparator(comp, this.options))
+      .join(' ')
+      .split(/\s+/)
+      // >=0.0.0 is equivalent to *
+      .map(comp => replaceGTE0(comp, this.options))
+
+    if (loose) {
+      // in loose mode, throw out any that are not valid comparators
+      rangeList = rangeList.filter(comp => {
+        debug('loose invalid filter', comp, this.options)
+        return !!comp.match(re[t.COMPARATORLOOSE])
+      })
+    }
+    debug('range list', rangeList)
+
+    // if any comparators are the null set, then replace with JUST null set
+    // if more than one comparator, remove any * comparators
+    // also, don't include the same comparator more than once
+    const rangeMap = new Map()
+    const comparators = rangeList.map(comp => new Comparator(comp, this.options))
+    for (const comp of comparators) {
+      if (isNullSet(comp)) {
+        return [comp]
+      }
+      rangeMap.set(comp.value, comp)
+    }
+    if (rangeMap.size > 1 && rangeMap.has('')) {
+      rangeMap.delete('')
+    }
+
+    const result = [...rangeMap.values()]
+    cache.set(memoKey, result)
+    return result
+  }
+
+  intersects (range, options) {
+    if (!(range instanceof Range)) {
+      throw new TypeError('a Range is required')
+    }
+
+    return this.set.some((thisComparators) => {
+      return (
+        isSatisfiable(thisComparators, options) &&
+        range.set.some((rangeComparators) => {
+          return (
+            isSatisfiable(rangeComparators, options) &&
+            thisComparators.every((thisComparator) => {
+              return rangeComparators.every((rangeComparator) => {
+                return thisComparator.intersects(rangeComparator, options)
+              })
+            })
+          )
+        })
+      )
+    })
+  }
+
+  // if ANY of the sets match ALL of its comparators, then pass
+  test (version) {
+    if (!version) {
+      return false
+    }
+
+    if (typeof version === 'string') {
+      try {
+        version = new SemVer(version, this.options)
+      } catch (er) {
+        return false
+      }
+    }
+
+    for (let i = 0; i < this.set.length; i++) {
+      if (testSet(this.set[i], version, this.options)) {
+        return true
+      }
+    }
+    return false
+  }
+}
+
+module.exports = Range
+
+const LRU = __nccwpck_require__(2443)
+const cache = new LRU()
+
+const parseOptions = __nccwpck_require__(2600)
+const Comparator = __nccwpck_require__(863)
+const debug = __nccwpck_require__(7611)
+const SemVer = __nccwpck_require__(4839)
+const {
+  safeRe: re,
+  t,
+  comparatorTrimReplace,
+  tildeTrimReplace,
+  caretTrimReplace,
+} = __nccwpck_require__(6211)
+const { FLAG_INCLUDE_PRERELEASE, FLAG_LOOSE } = __nccwpck_require__(4329)
+
+const isNullSet = c => c.value === '<0.0.0-0'
+const isAny = c => c.value === ''
+
+// take a set of comparators and determine whether there
+// exists a version which can satisfy it
+const isSatisfiable = (comparators, options) => {
+  let result = true
+  const remainingComparators = comparators.slice()
+  let testComparator = remainingComparators.pop()
+
+  while (result && remainingComparators.length) {
+    result = remainingComparators.every((otherComparator) => {
+      return testComparator.intersects(otherComparator, options)
+    })
+
+    testComparator = remainingComparators.pop()
+  }
+
+  return result
+}
+
+// comprised of xranges, tildes, stars, and gtlt's at this point.
+// already replaced the hyphen ranges
+// turn into a set of JUST comparators.
+const parseComparator = (comp, options) => {
+  debug('comp', comp, options)
+  comp = replaceCarets(comp, options)
+  debug('caret', comp)
+  comp = replaceTildes(comp, options)
+  debug('tildes', comp)
+  comp = replaceXRanges(comp, options)
+  debug('xrange', comp)
+  comp = replaceStars(comp, options)
+  debug('stars', comp)
+  return comp
+}
+
+const isX = id => !id || id.toLowerCase() === 'x' || id === '*'
+
+// ~, ~> --> * (any, kinda silly)
+// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0-0
+// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0-0
+// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0-0
+// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0-0
+// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0-0
+// ~0.0.1 --> >=0.0.1 <0.1.0-0
+const replaceTildes = (comp, options) => {
+  return comp
+    .trim()
+    .split(/\s+/)
+    .map((c) => replaceTilde(c, options))
+    .join(' ')
+}
+
+const replaceTilde = (comp, options) => {
+  const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE]
+  return comp.replace(r, (_, M, m, p, pr) => {
+    debug('tilde', comp, _, M, m, p, pr)
+    let ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = `>=${M}.0.0 <${+M + 1}.0.0-0`
+    } else if (isX(p)) {
+      // ~1.2 == >=1.2.0 <1.3.0-0
+      ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0-0`
+    } else if (pr) {
+      debug('replaceTilde pr', pr)
+      ret = `>=${M}.${m}.${p}-${pr
+      } <${M}.${+m + 1}.0-0`
+    } else {
+      // ~1.2.3 == >=1.2.3 <1.3.0-0
+      ret = `>=${M}.${m}.${p
+      } <${M}.${+m + 1}.0-0`
+    }
+
+    debug('tilde return', ret)
+    return ret
+  })
+}
+
+// ^ --> * (any, kinda silly)
+// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0-0
+// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0-0
+// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0-0
+// ^1.2.3 --> >=1.2.3 <2.0.0-0
+// ^1.2.0 --> >=1.2.0 <2.0.0-0
+// ^0.0.1 --> >=0.0.1 <0.0.2-0
+// ^0.1.0 --> >=0.1.0 <0.2.0-0
+const replaceCarets = (comp, options) => {
+  return comp
+    .trim()
+    .split(/\s+/)
+    .map((c) => replaceCaret(c, options))
+    .join(' ')
+}
+
+const replaceCaret = (comp, options) => {
+  debug('caret', comp, options)
+  const r = options.loose ? re[t.CARETLOOSE] : re[t.CARET]
+  const z = options.includePrerelease ? '-0' : ''
+  return comp.replace(r, (_, M, m, p, pr) => {
+    debug('caret', comp, _, M, m, p, pr)
+    let ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = `>=${M}.0.0${z} <${+M + 1}.0.0-0`
+    } else if (isX(p)) {
+      if (M === '0') {
+        ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0-0`
+      } else {
+        ret = `>=${M}.${m}.0${z} <${+M + 1}.0.0-0`
+      }
+    } else if (pr) {
+      debug('replaceCaret pr', pr)
+      if (M === '0') {
+        if (m === '0') {
+          ret = `>=${M}.${m}.${p}-${pr
+          } <${M}.${m}.${+p + 1}-0`
+        } else {
+          ret = `>=${M}.${m}.${p}-${pr
+          } <${M}.${+m + 1}.0-0`
+        }
+      } else {
+        ret = `>=${M}.${m}.${p}-${pr
+        } <${+M + 1}.0.0-0`
+      }
+    } else {
+      debug('no pr')
+      if (M === '0') {
+        if (m === '0') {
+          ret = `>=${M}.${m}.${p
+          }${z} <${M}.${m}.${+p + 1}-0`
+        } else {
+          ret = `>=${M}.${m}.${p
+          }${z} <${M}.${+m + 1}.0-0`
+        }
+      } else {
+        ret = `>=${M}.${m}.${p
+        } <${+M + 1}.0.0-0`
+      }
+    }
+
+    debug('caret return', ret)
+    return ret
+  })
+}
+
+const replaceXRanges = (comp, options) => {
+  debug('replaceXRanges', comp, options)
+  return comp
+    .split(/\s+/)
+    .map((c) => replaceXRange(c, options))
+    .join(' ')
+}
+
+const replaceXRange = (comp, options) => {
+  comp = comp.trim()
+  const r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE]
+  return comp.replace(r, (ret, gtlt, M, m, p, pr) => {
+    debug('xRange', comp, ret, gtlt, M, m, p, pr)
+    const xM = isX(M)
+    const xm = xM || isX(m)
+    const xp = xm || isX(p)
+    const anyX = xp
+
+    if (gtlt === '=' && anyX) {
+      gtlt = ''
+    }
+
+    // if we're including prereleases in the match, then we need
+    // to fix this to -0, the lowest possible prerelease value
+    pr = options.includePrerelease ? '-0' : ''
+
+    if (xM) {
+      if (gtlt === '>' || gtlt === '<') {
+        // nothing is allowed
+        ret = '<0.0.0-0'
+      } else {
+        // nothing is forbidden
+        ret = '*'
+      }
+    } else if (gtlt && anyX) {
+      // we know patch is an x, because we have any x at all.
+      // replace X with 0
+      if (xm) {
+        m = 0
+      }
+      p = 0
+
+      if (gtlt === '>') {
+        // >1 => >=2.0.0
+        // >1.2 => >=1.3.0
+        gtlt = '>='
+        if (xm) {
+          M = +M + 1
+          m = 0
+          p = 0
+        } else {
+          m = +m + 1
+          p = 0
+        }
+      } else if (gtlt === '<=') {
+        // <=0.7.x is actually <0.8.0, since any 0.7.x should
+        // pass.  Similarly, <=7.x is actually <8.0.0, etc.
+        gtlt = '<'
+        if (xm) {
+          M = +M + 1
+        } else {
+          m = +m + 1
+        }
+      }
+
+      if (gtlt === '<') {
+        pr = '-0'
+      }
+
+      ret = `${gtlt + M}.${m}.${p}${pr}`
+    } else if (xm) {
+      ret = `>=${M}.0.0${pr} <${+M + 1}.0.0-0`
+    } else if (xp) {
+      ret = `>=${M}.${m}.0${pr
+      } <${M}.${+m + 1}.0-0`
+    }
+
+    debug('xRange return', ret)
+
+    return ret
+  })
+}
+
+// Because * is AND-ed with everything else in the comparator,
+// and '' means "any version", just remove the *s entirely.
+const replaceStars = (comp, options) => {
+  debug('replaceStars', comp, options)
+  // Looseness is ignored here.  star is always as loose as it gets!
+  return comp
+    .trim()
+    .replace(re[t.STAR], '')
+}
+
+const replaceGTE0 = (comp, options) => {
+  debug('replaceGTE0', comp, options)
+  return comp
+    .trim()
+    .replace(re[options.includePrerelease ? t.GTE0PRE : t.GTE0], '')
+}
+
+// This function is passed to string.replace(re[t.HYPHENRANGE])
+// M, m, patch, prerelease, build
+// 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
+// 1.2.3 - 3.4 => >=1.2.0 <3.5.0-0 Any 3.4.x will do
+// 1.2 - 3.4 => >=1.2.0 <3.5.0-0
+// TODO build?
+const hyphenReplace = incPr => ($0,
+  from, fM, fm, fp, fpr, fb,
+  to, tM, tm, tp, tpr) => {
+  if (isX(fM)) {
+    from = ''
+  } else if (isX(fm)) {
+    from = `>=${fM}.0.0${incPr ? '-0' : ''}`
+  } else if (isX(fp)) {
+    from = `>=${fM}.${fm}.0${incPr ? '-0' : ''}`
+  } else if (fpr) {
+    from = `>=${from}`
+  } else {
+    from = `>=${from}${incPr ? '-0' : ''}`
+  }
+
+  if (isX(tM)) {
+    to = ''
+  } else if (isX(tm)) {
+    to = `<${+tM + 1}.0.0-0`
+  } else if (isX(tp)) {
+    to = `<${tM}.${+tm + 1}.0-0`
+  } else if (tpr) {
+    to = `<=${tM}.${tm}.${tp}-${tpr}`
+  } else if (incPr) {
+    to = `<${tM}.${tm}.${+tp + 1}-0`
+  } else {
+    to = `<=${to}`
+  }
+
+  return `${from} ${to}`.trim()
+}
+
+const testSet = (set, version, options) => {
+  for (let i = 0; i < set.length; i++) {
+    if (!set[i].test(version)) {
+      return false
+    }
+  }
+
+  if (version.prerelease.length && !options.includePrerelease) {
+    // Find the set of versions that are allowed to have prereleases
+    // For example, ^1.2.3-pr.1 desugars to >=1.2.3-pr.1 <2.0.0
+    // That should allow `1.2.3-pr.2` to pass.
+    // However, `1.2.4-alpha.notready` should NOT be allowed,
+    // even though it's within the range set by the comparators.
+    for (let i = 0; i < set.length; i++) {
+      debug(set[i].semver)
+      if (set[i].semver === Comparator.ANY) {
+        continue
+      }
+
+      if (set[i].semver.prerelease.length > 0) {
+        const allowed = set[i].semver
+        if (allowed.major === version.major &&
+            allowed.minor === version.minor &&
+            allowed.patch === version.patch) {
+          return true
+        }
+      }
+    }
+
+    // Version has a -pre, but it's not one of the ones we like.
+    return false
+  }
+
+  return true
+}
+
+
+/***/ }),
+
+/***/ 4839:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const debug = __nccwpck_require__(7611)
+const { MAX_LENGTH, MAX_SAFE_INTEGER } = __nccwpck_require__(4329)
+const { safeRe: re, t } = __nccwpck_require__(6211)
+
+const parseOptions = __nccwpck_require__(2600)
+const { compareIdentifiers } = __nccwpck_require__(6104)
+class SemVer {
+  constructor (version, options) {
+    options = parseOptions(options)
+
+    if (version instanceof SemVer) {
+      if (version.loose === !!options.loose &&
+        version.includePrerelease === !!options.includePrerelease) {
+        return version
+      } else {
+        version = version.version
+      }
+    } else if (typeof version !== 'string') {
+      throw new TypeError(`Invalid version. Must be a string. Got type "${typeof version}".`)
+    }
+
+    if (version.length > MAX_LENGTH) {
+      throw new TypeError(
+        `version is longer than ${MAX_LENGTH} characters`
+      )
+    }
+
+    debug('SemVer', version, options)
+    this.options = options
+    this.loose = !!options.loose
+    // this isn't actually relevant for versions, but keep it so that we
+    // don't run into trouble passing this.options around.
+    this.includePrerelease = !!options.includePrerelease
+
+    const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])
+
+    if (!m) {
+      throw new TypeError(`Invalid Version: ${version}`)
+    }
+
+    this.raw = version
+
+    // these are actually numbers
+    this.major = +m[1]
+    this.minor = +m[2]
+    this.patch = +m[3]
+
+    if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
+      throw new TypeError('Invalid major version')
+    }
+
+    if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
+      throw new TypeError('Invalid minor version')
+    }
+
+    if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
+      throw new TypeError('Invalid patch version')
+    }
+
+    // numberify any prerelease numeric ids
+    if (!m[4]) {
+      this.prerelease = []
+    } else {
+      this.prerelease = m[4].split('.').map((id) => {
+        if (/^[0-9]+$/.test(id)) {
+          const num = +id
+          if (num >= 0 && num < MAX_SAFE_INTEGER) {
+            return num
+          }
+        }
+        return id
+      })
+    }
+
+    this.build = m[5] ? m[5].split('.') : []
+    this.format()
+  }
+
+  format () {
+    this.version = `${this.major}.${this.minor}.${this.patch}`
+    if (this.prerelease.length) {
+      this.version += `-${this.prerelease.join('.')}`
+    }
+    return this.version
+  }
+
+  toString () {
+    return this.version
+  }
+
+  compare (other) {
+    debug('SemVer.compare', this.version, this.options, other)
+    if (!(other instanceof SemVer)) {
+      if (typeof other === 'string' && other === this.version) {
+        return 0
+      }
+      other = new SemVer(other, this.options)
+    }
+
+    if (other.version === this.version) {
+      return 0
+    }
+
+    return this.compareMain(other) || this.comparePre(other)
+  }
+
+  compareMain (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    return (
+      compareIdentifiers(this.major, other.major) ||
+      compareIdentifiers(this.minor, other.minor) ||
+      compareIdentifiers(this.patch, other.patch)
+    )
+  }
+
+  comparePre (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    // NOT having a prerelease is > having one
+    if (this.prerelease.length && !other.prerelease.length) {
+      return -1
+    } else if (!this.prerelease.length && other.prerelease.length) {
+      return 1
+    } else if (!this.prerelease.length && !other.prerelease.length) {
+      return 0
+    }
+
+    let i = 0
+    do {
+      const a = this.prerelease[i]
+      const b = other.prerelease[i]
+      debug('prerelease compare', i, a, b)
+      if (a === undefined && b === undefined) {
+        return 0
+      } else if (b === undefined) {
+        return 1
+      } else if (a === undefined) {
+        return -1
+      } else if (a === b) {
+        continue
+      } else {
+        return compareIdentifiers(a, b)
+      }
+    } while (++i)
+  }
+
+  compareBuild (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    let i = 0
+    do {
+      const a = this.build[i]
+      const b = other.build[i]
+      debug('build compare', i, a, b)
+      if (a === undefined && b === undefined) {
+        return 0
+      } else if (b === undefined) {
+        return 1
+      } else if (a === undefined) {
+        return -1
+      } else if (a === b) {
+        continue
+      } else {
+        return compareIdentifiers(a, b)
+      }
+    } while (++i)
+  }
+
+  // preminor will bump the version up to the next minor release, and immediately
+  // down to pre-release. premajor and prepatch work the same way.
+  inc (release, identifier, identifierBase) {
+    if (release.startsWith('pre')) {
+      if (!identifier && identifierBase === false) {
+        throw new Error('invalid increment argument: identifier is empty')
+      }
+      // Avoid an invalid semver results
+      if (identifier) {
+        const match = `-${identifier}`.match(this.options.loose ? re[t.PRERELEASELOOSE] : re[t.PRERELEASE])
+        if (!match || match[1] !== identifier) {
+          throw new Error(`invalid identifier: ${identifier}`)
+        }
+      }
+    }
+
+    switch (release) {
+      case 'premajor':
+        this.prerelease.length = 0
+        this.patch = 0
+        this.minor = 0
+        this.major++
+        this.inc('pre', identifier, identifierBase)
+        break
+      case 'preminor':
+        this.prerelease.length = 0
+        this.patch = 0
+        this.minor++
+        this.inc('pre', identifier, identifierBase)
+        break
+      case 'prepatch':
+        // If this is already a prerelease, it will bump to the next version
+        // drop any prereleases that might already exist, since they are not
+        // relevant at this point.
+        this.prerelease.length = 0
+        this.inc('patch', identifier, identifierBase)
+        this.inc('pre', identifier, identifierBase)
+        break
+      // If the input is a non-prerelease version, this acts the same as
+      // prepatch.
+      case 'prerelease':
+        if (this.prerelease.length === 0) {
+          this.inc('patch', identifier, identifierBase)
+        }
+        this.inc('pre', identifier, identifierBase)
+        break
+      case 'release':
+        if (this.prerelease.length === 0) {
+          throw new Error(`version ${this.raw} is not a prerelease`)
+        }
+        this.prerelease.length = 0
+        break
+
+      case 'major':
+        // If this is a pre-major version, bump up to the same major version.
+        // Otherwise increment major.
+        // 1.0.0-5 bumps to 1.0.0
+        // 1.1.0 bumps to 2.0.0
+        if (
+          this.minor !== 0 ||
+          this.patch !== 0 ||
+          this.prerelease.length === 0
+        ) {
+          this.major++
+        }
+        this.minor = 0
+        this.patch = 0
+        this.prerelease = []
+        break
+      case 'minor':
+        // If this is a pre-minor version, bump up to the same minor version.
+        // Otherwise increment minor.
+        // 1.2.0-5 bumps to 1.2.0
+        // 1.2.1 bumps to 1.3.0
+        if (this.patch !== 0 || this.prerelease.length === 0) {
+          this.minor++
+        }
+        this.patch = 0
+        this.prerelease = []
+        break
+      case 'patch':
+        // If this is not a pre-release version, it will increment the patch.
+        // If it is a pre-release it will bump up to the same patch version.
+        // 1.2.0-5 patches to 1.2.0
+        // 1.2.0 patches to 1.2.1
+        if (this.prerelease.length === 0) {
+          this.patch++
+        }
+        this.prerelease = []
+        break
+      // This probably shouldn't be used publicly.
+      // 1.0.0 'pre' would become 1.0.0-0 which is the wrong direction.
+      case 'pre': {
+        const base = Number(identifierBase) ? 1 : 0
+
+        if (this.prerelease.length === 0) {
+          this.prerelease = [base]
+        } else {
+          let i = this.prerelease.length
+          while (--i >= 0) {
+            if (typeof this.prerelease[i] === 'number') {
+              this.prerelease[i]++
+              i = -2
+            }
+          }
+          if (i === -1) {
+            // didn't increment anything
+            if (identifier === this.prerelease.join('.') && identifierBase === false) {
+              throw new Error('invalid increment argument: identifier already exists')
+            }
+            this.prerelease.push(base)
+          }
+        }
+        if (identifier) {
+          // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
+          // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+          let prerelease = [identifier, base]
+          if (identifierBase === false) {
+            prerelease = [identifier]
+          }
+          if (compareIdentifiers(this.prerelease[0], identifier) === 0) {
+            if (isNaN(this.prerelease[1])) {
+              this.prerelease = prerelease
+            }
+          } else {
+            this.prerelease = prerelease
+          }
+        }
+        break
+      }
+      default:
+        throw new Error(`invalid increment argument: ${release}`)
+    }
+    this.raw = this.format()
+    if (this.build.length) {
+      this.raw += `+${this.build.join('.')}`
+    }
+    return this
+  }
+}
+
+module.exports = SemVer
+
+
+/***/ }),
+
+/***/ 2771:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const parse = __nccwpck_require__(893)
+const clean = (version, options) => {
+  const s = parse(version.trim().replace(/^[=v]+/, ''), options)
+  return s ? s.version : null
+}
+module.exports = clean
+
+
+/***/ }),
+
+/***/ 5618:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const eq = __nccwpck_require__(5630)
+const neq = __nccwpck_require__(3282)
+const gt = __nccwpck_require__(5283)
+const gte = __nccwpck_require__(6064)
+const lt = __nccwpck_require__(6108)
+const lte = __nccwpck_require__(3353)
+
+const cmp = (a, op, b, loose) => {
+  switch (op) {
+    case '===':
+      if (typeof a === 'object') {
+        a = a.version
+      }
+      if (typeof b === 'object') {
+        b = b.version
+      }
+      return a === b
+
+    case '!==':
+      if (typeof a === 'object') {
+        a = a.version
+      }
+      if (typeof b === 'object') {
+        b = b.version
+      }
+      return a !== b
+
+    case '':
+    case '=':
+    case '==':
+      return eq(a, b, loose)
+
+    case '!=':
+      return neq(a, b, loose)
+
+    case '>':
+      return gt(a, b, loose)
+
+    case '>=':
+      return gte(a, b, loose)
+
+    case '<':
+      return lt(a, b, loose)
+
+    case '<=':
+      return lte(a, b, loose)
+
+    default:
+      throw new TypeError(`Invalid operator: ${op}`)
+  }
+}
+module.exports = cmp
+
+
+/***/ }),
+
+/***/ 3597:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const parse = __nccwpck_require__(893)
+const { safeRe: re, t } = __nccwpck_require__(6211)
+
+const coerce = (version, options) => {
+  if (version instanceof SemVer) {
+    return version
+  }
+
+  if (typeof version === 'number') {
+    version = String(version)
+  }
+
+  if (typeof version !== 'string') {
+    return null
+  }
+
+  options = options || {}
+
+  let match = null
+  if (!options.rtl) {
+    match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE])
+  } else {
+    // Find the right-most coercible string that does not share
+    // a terminus with a more left-ward coercible string.
+    // Eg, '1.2.3.4' wants to coerce '2.3.4', not '3.4' or '4'
+    // With includePrerelease option set, '1.2.3.4-rc' wants to coerce '2.3.4-rc', not '2.3.4'
+    //
+    // Walk through the string checking with a /g regexp
+    // Manually set the index so as to pick up overlapping matches.
+    // Stop when we get a match that ends at the string end, since no
+    // coercible string can be more right-ward without the same terminus.
+    const coerceRtlRegex = options.includePrerelease ? re[t.COERCERTLFULL] : re[t.COERCERTL]
+    let next
+    while ((next = coerceRtlRegex.exec(version)) &&
+        (!match || match.index + match[0].length !== version.length)
+    ) {
+      if (!match ||
+            next.index + next[0].length !== match.index + match[0].length) {
+        match = next
+      }
+      coerceRtlRegex.lastIndex = next.index + next[1].length + next[2].length
+    }
+    // leave it in a clean state
+    coerceRtlRegex.lastIndex = -1
+  }
+
+  if (match === null) {
+    return null
+  }
+
+  const major = match[2]
+  const minor = match[3] || '0'
+  const patch = match[4] || '0'
+  const prerelease = options.includePrerelease && match[5] ? `-${match[5]}` : ''
+  const build = options.includePrerelease && match[6] ? `+${match[6]}` : ''
+
+  return parse(`${major}.${minor}.${patch}${prerelease}${build}`, options)
+}
+module.exports = coerce
+
+
+/***/ }),
+
+/***/ 3932:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const compareBuild = (a, b, loose) => {
+  const versionA = new SemVer(a, loose)
+  const versionB = new SemVer(b, loose)
+  return versionA.compare(versionB) || versionA.compareBuild(versionB)
+}
+module.exports = compareBuild
+
+
+/***/ }),
+
+/***/ 9822:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const compareLoose = (a, b) => compare(a, b, true)
+module.exports = compareLoose
+
+
+/***/ }),
+
+/***/ 6625:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const compare = (a, b, loose) =>
+  new SemVer(a, loose).compare(new SemVer(b, loose))
+
+module.exports = compare
+
+
+/***/ }),
+
+/***/ 1531:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const parse = __nccwpck_require__(893)
+
+const diff = (version1, version2) => {
+  const v1 = parse(version1, null, true)
+  const v2 = parse(version2, null, true)
+  const comparison = v1.compare(v2)
+
+  if (comparison === 0) {
+    return null
+  }
+
+  const v1Higher = comparison > 0
+  const highVersion = v1Higher ? v1 : v2
+  const lowVersion = v1Higher ? v2 : v1
+  const highHasPre = !!highVersion.prerelease.length
+  const lowHasPre = !!lowVersion.prerelease.length
+
+  if (lowHasPre && !highHasPre) {
+    // Going from prerelease -> no prerelease requires some special casing
+
+    // If the low version has only a major, then it will always be a major
+    // Some examples:
+    // 1.0.0-1 -> 1.0.0
+    // 1.0.0-1 -> 1.1.1
+    // 1.0.0-1 -> 2.0.0
+    if (!lowVersion.patch && !lowVersion.minor) {
+      return 'major'
+    }
+
+    // If the main part has no difference
+    if (lowVersion.compareMain(highVersion) === 0) {
+      if (lowVersion.minor && !lowVersion.patch) {
+        return 'minor'
+      }
+      return 'patch'
+    }
+  }
+
+  // add the `pre` prefix if we are going to a prerelease version
+  const prefix = highHasPre ? 'pre' : ''
+
+  if (v1.major !== v2.major) {
+    return prefix + 'major'
+  }
+
+  if (v1.minor !== v2.minor) {
+    return prefix + 'minor'
+  }
+
+  if (v1.patch !== v2.patch) {
+    return prefix + 'patch'
+  }
+
+  // high and low are preleases
+  return 'prerelease'
+}
+
+module.exports = diff
+
+
+/***/ }),
+
+/***/ 5630:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const eq = (a, b, loose) => compare(a, b, loose) === 0
+module.exports = eq
+
+
+/***/ }),
+
+/***/ 5283:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const gt = (a, b, loose) => compare(a, b, loose) > 0
+module.exports = gt
+
+
+/***/ }),
+
+/***/ 6064:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const gte = (a, b, loose) => compare(a, b, loose) >= 0
+module.exports = gte
+
+
+/***/ }),
+
+/***/ 2782:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+
+const inc = (version, release, options, identifier, identifierBase) => {
+  if (typeof (options) === 'string') {
+    identifierBase = identifier
+    identifier = options
+    options = undefined
+  }
+
+  try {
+    return new SemVer(
+      version instanceof SemVer ? version.version : version,
+      options
+    ).inc(release, identifier, identifierBase).version
+  } catch (er) {
+    return null
+  }
+}
+module.exports = inc
+
+
+/***/ }),
+
+/***/ 6108:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const lt = (a, b, loose) => compare(a, b, loose) < 0
+module.exports = lt
+
+
+/***/ }),
+
+/***/ 3353:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const lte = (a, b, loose) => compare(a, b, loose) <= 0
+module.exports = lte
+
+
+/***/ }),
+
+/***/ 5251:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const major = (a, loose) => new SemVer(a, loose).major
+module.exports = major
+
+
+/***/ }),
+
+/***/ 5479:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const minor = (a, loose) => new SemVer(a, loose).minor
+module.exports = minor
+
+
+/***/ }),
+
+/***/ 3282:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const neq = (a, b, loose) => compare(a, b, loose) !== 0
+module.exports = neq
+
+
+/***/ }),
+
+/***/ 893:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const parse = (version, options, throwErrors = false) => {
+  if (version instanceof SemVer) {
+    return version
+  }
+  try {
+    return new SemVer(version, options)
+  } catch (er) {
+    if (!throwErrors) {
+      return null
+    }
+    throw er
+  }
+}
+
+module.exports = parse
+
+
+/***/ }),
+
+/***/ 7056:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const patch = (a, loose) => new SemVer(a, loose).patch
+module.exports = patch
+
+
+/***/ }),
+
+/***/ 390:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const parse = __nccwpck_require__(893)
+const prerelease = (version, options) => {
+  const parsed = parse(version, options)
+  return (parsed && parsed.prerelease.length) ? parsed.prerelease : null
+}
+module.exports = prerelease
+
+
+/***/ }),
+
+/***/ 9729:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compare = __nccwpck_require__(6625)
+const rcompare = (a, b, loose) => compare(b, a, loose)
+module.exports = rcompare
+
+
+/***/ }),
+
+/***/ 8828:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compareBuild = __nccwpck_require__(3932)
+const rsort = (list, loose) => list.sort((a, b) => compareBuild(b, a, loose))
+module.exports = rsort
+
+
+/***/ }),
+
+/***/ 9751:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const Range = __nccwpck_require__(6093)
+const satisfies = (version, range, options) => {
+  try {
+    range = new Range(range, options)
+  } catch (er) {
+    return false
+  }
+  return range.test(version)
+}
+module.exports = satisfies
+
+
+/***/ }),
+
+/***/ 6476:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const compareBuild = __nccwpck_require__(3932)
+const sort = (list, loose) => list.sort((a, b) => compareBuild(a, b, loose))
+module.exports = sort
+
+
+/***/ }),
+
+/***/ 5752:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const parse = __nccwpck_require__(893)
+const valid = (version, options) => {
+  const v = parse(version, options)
+  return v ? v.version : null
+}
+module.exports = valid
+
+
+/***/ }),
+
+/***/ 2348:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+// just pre-load all the stuff that index.js lazily exports
+const internalRe = __nccwpck_require__(6211)
+const constants = __nccwpck_require__(4329)
+const SemVer = __nccwpck_require__(4839)
+const identifiers = __nccwpck_require__(6104)
+const parse = __nccwpck_require__(893)
+const valid = __nccwpck_require__(5752)
+const clean = __nccwpck_require__(2771)
+const inc = __nccwpck_require__(2782)
+const diff = __nccwpck_require__(1531)
+const major = __nccwpck_require__(5251)
+const minor = __nccwpck_require__(5479)
+const patch = __nccwpck_require__(7056)
+const prerelease = __nccwpck_require__(390)
+const compare = __nccwpck_require__(6625)
+const rcompare = __nccwpck_require__(9729)
+const compareLoose = __nccwpck_require__(9822)
+const compareBuild = __nccwpck_require__(3932)
+const sort = __nccwpck_require__(6476)
+const rsort = __nccwpck_require__(8828)
+const gt = __nccwpck_require__(5283)
+const lt = __nccwpck_require__(6108)
+const eq = __nccwpck_require__(5630)
+const neq = __nccwpck_require__(3282)
+const gte = __nccwpck_require__(6064)
+const lte = __nccwpck_require__(3353)
+const cmp = __nccwpck_require__(5618)
+const coerce = __nccwpck_require__(3597)
+const Comparator = __nccwpck_require__(863)
+const Range = __nccwpck_require__(6093)
+const satisfies = __nccwpck_require__(9751)
+const toComparators = __nccwpck_require__(2258)
+const maxSatisfying = __nccwpck_require__(9269)
+const minSatisfying = __nccwpck_require__(1367)
+const minVersion = __nccwpck_require__(6950)
+const validRange = __nccwpck_require__(8733)
+const outside = __nccwpck_require__(4772)
+const gtr = __nccwpck_require__(712)
+const ltr = __nccwpck_require__(5585)
+const intersects = __nccwpck_require__(1357)
+const simplifyRange = __nccwpck_require__(7344)
+const subset = __nccwpck_require__(4837)
+module.exports = {
+  parse,
+  valid,
+  clean,
+  inc,
+  diff,
+  major,
+  minor,
+  patch,
+  prerelease,
+  compare,
+  rcompare,
+  compareLoose,
+  compareBuild,
+  sort,
+  rsort,
+  gt,
+  lt,
+  eq,
+  neq,
+  gte,
+  lte,
+  cmp,
+  coerce,
+  Comparator,
+  Range,
+  satisfies,
+  toComparators,
+  maxSatisfying,
+  minSatisfying,
+  minVersion,
+  validRange,
+  outside,
+  gtr,
+  ltr,
+  intersects,
+  simplifyRange,
+  subset,
+  SemVer,
+  re: internalRe.re,
+  src: internalRe.src,
+  tokens: internalRe.t,
+  SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,
+  RELEASE_TYPES: constants.RELEASE_TYPES,
+  compareIdentifiers: identifiers.compareIdentifiers,
+  rcompareIdentifiers: identifiers.rcompareIdentifiers,
+}
+
+
+/***/ }),
+
+/***/ 4329:
+/***/ ((module) => {
+
+
+
+// Note: this is the semver.org version of the spec that it implements
+// Not necessarily the package version of this code.
+const SEMVER_SPEC_VERSION = '2.0.0'
+
+const MAX_LENGTH = 256
+const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
+/* istanbul ignore next */ 9007199254740991
+
+// Max safe segment length for coercion.
+const MAX_SAFE_COMPONENT_LENGTH = 16
+
+// Max safe length for a build identifier. The max length minus 6 characters for
+// the shortest version with a build 0.0.0+BUILD.
+const MAX_SAFE_BUILD_LENGTH = MAX_LENGTH - 6
+
+const RELEASE_TYPES = [
+  'major',
+  'premajor',
+  'minor',
+  'preminor',
+  'patch',
+  'prepatch',
+  'prerelease',
+]
+
+module.exports = {
+  MAX_LENGTH,
+  MAX_SAFE_COMPONENT_LENGTH,
+  MAX_SAFE_BUILD_LENGTH,
+  MAX_SAFE_INTEGER,
+  RELEASE_TYPES,
+  SEMVER_SPEC_VERSION,
+  FLAG_INCLUDE_PRERELEASE: 0b001,
+  FLAG_LOOSE: 0b010,
+}
+
+
+/***/ }),
+
+/***/ 7611:
+/***/ ((module) => {
+
+
+
+const debug = (
+  typeof process === 'object' &&
+  process.env &&
+  process.env.NODE_DEBUG &&
+  /\bsemver\b/i.test(process.env.NODE_DEBUG)
+) ? (...args) => console.error('SEMVER', ...args)
+  : () => {}
+
+module.exports = debug
+
+
+/***/ }),
+
+/***/ 6104:
+/***/ ((module) => {
+
+
+
+const numeric = /^[0-9]+$/
+const compareIdentifiers = (a, b) => {
+  const anum = numeric.test(a)
+  const bnum = numeric.test(b)
+
+  if (anum && bnum) {
+    a = +a
+    b = +b
+  }
+
+  return a === b ? 0
+    : (anum && !bnum) ? -1
+    : (bnum && !anum) ? 1
+    : a < b ? -1
+    : 1
+}
+
+const rcompareIdentifiers = (a, b) => compareIdentifiers(b, a)
+
+module.exports = {
+  compareIdentifiers,
+  rcompareIdentifiers,
+}
+
+
+/***/ }),
+
+/***/ 2443:
+/***/ ((module) => {
+
+
+
+class LRUCache {
+  constructor () {
+    this.max = 1000
+    this.map = new Map()
+  }
+
+  get (key) {
+    const value = this.map.get(key)
+    if (value === undefined) {
+      return undefined
+    } else {
+      // Remove the key from the map and add it to the end
+      this.map.delete(key)
+      this.map.set(key, value)
+      return value
+    }
+  }
+
+  delete (key) {
+    return this.map.delete(key)
+  }
+
+  set (key, value) {
+    const deleted = this.delete(key)
+
+    if (!deleted && value !== undefined) {
+      // If cache is full, delete the least recently used item
+      if (this.map.size >= this.max) {
+        const firstKey = this.map.keys().next().value
+        this.delete(firstKey)
+      }
+
+      this.map.set(key, value)
+    }
+
+    return this
+  }
+}
+
+module.exports = LRUCache
+
+
+/***/ }),
+
+/***/ 2600:
+/***/ ((module) => {
+
+
+
+// parse out just the options we care about
+const looseOption = Object.freeze({ loose: true })
+const emptyOpts = Object.freeze({ })
+const parseOptions = options => {
+  if (!options) {
+    return emptyOpts
+  }
+
+  if (typeof options !== 'object') {
+    return looseOption
+  }
+
+  return options
+}
+module.exports = parseOptions
+
+
+/***/ }),
+
+/***/ 6211:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+
+
+const {
+  MAX_SAFE_COMPONENT_LENGTH,
+  MAX_SAFE_BUILD_LENGTH,
+  MAX_LENGTH,
+} = __nccwpck_require__(4329)
+const debug = __nccwpck_require__(7611)
+exports = module.exports = {}
+
+// The actual regexps go on exports.re
+const re = exports.re = []
+const safeRe = exports.safeRe = []
+const src = exports.src = []
+const safeSrc = exports.safeSrc = []
+const t = exports.t = {}
+let R = 0
+
+const LETTERDASHNUMBER = '[a-zA-Z0-9-]'
+
+// Replace some greedy regex tokens to prevent regex dos issues. These regex are
+// used internally via the safeRe object since all inputs in this library get
+// normalized first to trim and collapse all extra whitespace. The original
+// regexes are exported for userland consumption and lower level usage. A
+// future breaking change could export the safer regex only with a note that
+// all input should have extra whitespace removed.
+const safeRegexReplacements = [
+  ['\\s', 1],
+  ['\\d', MAX_LENGTH],
+  [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH],
+]
+
+const makeSafeRegex = (value) => {
+  for (const [token, max] of safeRegexReplacements) {
+    value = value
+      .split(`${token}*`).join(`${token}{0,${max}}`)
+      .split(`${token}+`).join(`${token}{1,${max}}`)
+  }
+  return value
+}
+
+const createToken = (name, value, isGlobal) => {
+  const safe = makeSafeRegex(value)
+  const index = R++
+  debug(name, index, value)
+  t[name] = index
+  src[index] = value
+  safeSrc[index] = safe
+  re[index] = new RegExp(value, isGlobal ? 'g' : undefined)
+  safeRe[index] = new RegExp(safe, isGlobal ? 'g' : undefined)
+}
+
+// The following Regular Expressions can be used for tokenizing,
+// validating, and parsing SemVer version strings.
+
+// ## Numeric Identifier
+// A single `0`, or a non-zero digit followed by zero or more digits.
+
+createToken('NUMERICIDENTIFIER', '0|[1-9]\\d*')
+createToken('NUMERICIDENTIFIERLOOSE', '\\d+')
+
+// ## Non-numeric Identifier
+// Zero or more digits, followed by a letter or hyphen, and then zero or
+// more letters, digits, or hyphens.
+
+createToken('NONNUMERICIDENTIFIER', `\\d*[a-zA-Z-]${LETTERDASHNUMBER}*`)
+
+// ## Main Version
+// Three dot-separated numeric identifiers.
+
+createToken('MAINVERSION', `(${src[t.NUMERICIDENTIFIER]})\\.` +
+                   `(${src[t.NUMERICIDENTIFIER]})\\.` +
+                   `(${src[t.NUMERICIDENTIFIER]})`)
+
+createToken('MAINVERSIONLOOSE', `(${src[t.NUMERICIDENTIFIERLOOSE]})\\.` +
+                        `(${src[t.NUMERICIDENTIFIERLOOSE]})\\.` +
+                        `(${src[t.NUMERICIDENTIFIERLOOSE]})`)
+
+// ## Pre-release Version Identifier
+// A numeric identifier, or a non-numeric identifier.
+// Non-numberic identifiers include numberic identifiers but can be longer.
+// Therefore non-numberic identifiers must go first.
+
+createToken('PRERELEASEIDENTIFIER', `(?:${src[t.NONNUMERICIDENTIFIER]
+}|${src[t.NUMERICIDENTIFIER]})`)
+
+createToken('PRERELEASEIDENTIFIERLOOSE', `(?:${src[t.NONNUMERICIDENTIFIER]
+}|${src[t.NUMERICIDENTIFIERLOOSE]})`)
+
+// ## Pre-release Version
+// Hyphen, followed by one or more dot-separated pre-release version
+// identifiers.
+
+createToken('PRERELEASE', `(?:-(${src[t.PRERELEASEIDENTIFIER]
+}(?:\\.${src[t.PRERELEASEIDENTIFIER]})*))`)
+
+createToken('PRERELEASELOOSE', `(?:-?(${src[t.PRERELEASEIDENTIFIERLOOSE]
+}(?:\\.${src[t.PRERELEASEIDENTIFIERLOOSE]})*))`)
+
+// ## Build Metadata Identifier
+// Any combination of digits, letters, or hyphens.
+
+createToken('BUILDIDENTIFIER', `${LETTERDASHNUMBER}+`)
+
+// ## Build Metadata
+// Plus sign, followed by one or more period-separated build metadata
+// identifiers.
+
+createToken('BUILD', `(?:\\+(${src[t.BUILDIDENTIFIER]
+}(?:\\.${src[t.BUILDIDENTIFIER]})*))`)
+
+// ## Full Version String
+// A main version, followed optionally by a pre-release version and
+// build metadata.
+
+// Note that the only major, minor, patch, and pre-release sections of
+// the version string are capturing groups.  The build metadata is not a
+// capturing group, because it should not ever be used in version
+// comparison.
+
+createToken('FULLPLAIN', `v?${src[t.MAINVERSION]
+}${src[t.PRERELEASE]}?${
+  src[t.BUILD]}?`)
+
+createToken('FULL', `^${src[t.FULLPLAIN]}$`)
+
+// like full, but allows v1.2.3 and =1.2.3, which people do sometimes.
+// also, 1.0.0alpha1 (prerelease without the hyphen) which is pretty
+// common in the npm registry.
+createToken('LOOSEPLAIN', `[v=\\s]*${src[t.MAINVERSIONLOOSE]
+}${src[t.PRERELEASELOOSE]}?${
+  src[t.BUILD]}?`)
+
+createToken('LOOSE', `^${src[t.LOOSEPLAIN]}$`)
+
+createToken('GTLT', '((?:<|>)?=?)')
+
+// Something like "2.*" or "1.2.x".
+// Note that "x.x" is a valid xRange identifer, meaning "any version"
+// Only the first item is strictly required.
+createToken('XRANGEIDENTIFIERLOOSE', `${src[t.NUMERICIDENTIFIERLOOSE]}|x|X|\\*`)
+createToken('XRANGEIDENTIFIER', `${src[t.NUMERICIDENTIFIER]}|x|X|\\*`)
+
+createToken('XRANGEPLAIN', `[v=\\s]*(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:\\.(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:\\.(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:${src[t.PRERELEASE]})?${
+                     src[t.BUILD]}?` +
+                   `)?)?`)
+
+createToken('XRANGEPLAINLOOSE', `[v=\\s]*(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:${src[t.PRERELEASELOOSE]})?${
+                          src[t.BUILD]}?` +
+                        `)?)?`)
+
+createToken('XRANGE', `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAIN]}$`)
+createToken('XRANGELOOSE', `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAINLOOSE]}$`)
+
+// Coercion.
+// Extract anything that could conceivably be a part of a valid semver
+createToken('COERCEPLAIN', `${'(^|[^\\d])' +
+              '(\\d{1,'}${MAX_SAFE_COMPONENT_LENGTH}})` +
+              `(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?` +
+              `(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?`)
+createToken('COERCE', `${src[t.COERCEPLAIN]}(?:$|[^\\d])`)
+createToken('COERCEFULL', src[t.COERCEPLAIN] +
+              `(?:${src[t.PRERELEASE]})?` +
+              `(?:${src[t.BUILD]})?` +
+              `(?:$|[^\\d])`)
+createToken('COERCERTL', src[t.COERCE], true)
+createToken('COERCERTLFULL', src[t.COERCEFULL], true)
+
+// Tilde ranges.
+// Meaning is "reasonably at or greater than"
+createToken('LONETILDE', '(?:~>?)')
+
+createToken('TILDETRIM', `(\\s*)${src[t.LONETILDE]}\\s+`, true)
+exports.tildeTrimReplace = '$1~'
+
+createToken('TILDE', `^${src[t.LONETILDE]}${src[t.XRANGEPLAIN]}$`)
+createToken('TILDELOOSE', `^${src[t.LONETILDE]}${src[t.XRANGEPLAINLOOSE]}$`)
+
+// Caret ranges.
+// Meaning is "at least and backwards compatible with"
+createToken('LONECARET', '(?:\\^)')
+
+createToken('CARETTRIM', `(\\s*)${src[t.LONECARET]}\\s+`, true)
+exports.caretTrimReplace = '$1^'
+
+createToken('CARET', `^${src[t.LONECARET]}${src[t.XRANGEPLAIN]}$`)
+createToken('CARETLOOSE', `^${src[t.LONECARET]}${src[t.XRANGEPLAINLOOSE]}$`)
+
+// A simple gt/lt/eq thing, or just "" to indicate "any version"
+createToken('COMPARATORLOOSE', `^${src[t.GTLT]}\\s*(${src[t.LOOSEPLAIN]})$|^$`)
+createToken('COMPARATOR', `^${src[t.GTLT]}\\s*(${src[t.FULLPLAIN]})$|^$`)
+
+// An expression to strip any whitespace between the gtlt and the thing
+// it modifies, so that `> 1.2.3` ==> `>1.2.3`
+createToken('COMPARATORTRIM', `(\\s*)${src[t.GTLT]
+}\\s*(${src[t.LOOSEPLAIN]}|${src[t.XRANGEPLAIN]})`, true)
+exports.comparatorTrimReplace = '$1$2$3'
+
+// Something like `1.2.3 - 1.2.4`
+// Note that these all use the loose form, because they'll be
+// checked against either the strict or loose comparator form
+// later.
+createToken('HYPHENRANGE', `^\\s*(${src[t.XRANGEPLAIN]})` +
+                   `\\s+-\\s+` +
+                   `(${src[t.XRANGEPLAIN]})` +
+                   `\\s*$`)
+
+createToken('HYPHENRANGELOOSE', `^\\s*(${src[t.XRANGEPLAINLOOSE]})` +
+                        `\\s+-\\s+` +
+                        `(${src[t.XRANGEPLAINLOOSE]})` +
+                        `\\s*$`)
+
+// Star ranges basically just allow anything at all.
+createToken('STAR', '(<|>)?=?\\s*\\*')
+// >=0.0.0 is like a star
+createToken('GTE0', '^\\s*>=\\s*0\\.0\\.0\\s*$')
+createToken('GTE0PRE', '^\\s*>=\\s*0\\.0\\.0-0\\s*$')
+
+
+/***/ }),
+
+/***/ 712:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+// Determine if version is greater than all the versions possible in the range.
+const outside = __nccwpck_require__(4772)
+const gtr = (version, range, options) => outside(version, range, '>', options)
+module.exports = gtr
+
+
+/***/ }),
+
+/***/ 1357:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const Range = __nccwpck_require__(6093)
+const intersects = (r1, r2, options) => {
+  r1 = new Range(r1, options)
+  r2 = new Range(r2, options)
+  return r1.intersects(r2, options)
+}
+module.exports = intersects
+
+
+/***/ }),
+
+/***/ 5585:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const outside = __nccwpck_require__(4772)
+// Determine if version is less than all the versions possible in the range
+const ltr = (version, range, options) => outside(version, range, '<', options)
+module.exports = ltr
+
+
+/***/ }),
+
+/***/ 9269:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const Range = __nccwpck_require__(6093)
+
+const maxSatisfying = (versions, range, options) => {
+  let max = null
+  let maxSV = null
+  let rangeObj = null
+  try {
+    rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach((v) => {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!max || maxSV.compare(v) === -1) {
+        // compare(max, v, true)
+        max = v
+        maxSV = new SemVer(max, options)
+      }
+    }
+  })
+  return max
+}
+module.exports = maxSatisfying
+
+
+/***/ }),
+
+/***/ 1367:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const Range = __nccwpck_require__(6093)
+const minSatisfying = (versions, range, options) => {
+  let min = null
+  let minSV = null
+  let rangeObj = null
+  try {
+    rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach((v) => {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!min || minSV.compare(v) === 1) {
+        // compare(min, v, true)
+        min = v
+        minSV = new SemVer(min, options)
+      }
+    }
+  })
+  return min
+}
+module.exports = minSatisfying
+
+
+/***/ }),
+
+/***/ 6950:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const Range = __nccwpck_require__(6093)
+const gt = __nccwpck_require__(5283)
+
+const minVersion = (range, loose) => {
+  range = new Range(range, loose)
+
+  let minver = new SemVer('0.0.0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = new SemVer('0.0.0-0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = null
+  for (let i = 0; i < range.set.length; ++i) {
+    const comparators = range.set[i]
+
+    let setMin = null
+    comparators.forEach((comparator) => {
+      // Clone to avoid manipulating the comparator's semver object.
+      const compver = new SemVer(comparator.semver.version)
+      switch (comparator.operator) {
+        case '>':
+          if (compver.prerelease.length === 0) {
+            compver.patch++
+          } else {
+            compver.prerelease.push(0)
+          }
+          compver.raw = compver.format()
+          /* fallthrough */
+        case '':
+        case '>=':
+          if (!setMin || gt(compver, setMin)) {
+            setMin = compver
+          }
+          break
+        case '<':
+        case '<=':
+          /* Ignore maximum versions */
+          break
+        /* istanbul ignore next */
+        default:
+          throw new Error(`Unexpected operation: ${comparator.operator}`)
+      }
+    })
+    if (setMin && (!minver || gt(minver, setMin))) {
+      minver = setMin
+    }
+  }
+
+  if (minver && range.test(minver)) {
+    return minver
+  }
+
+  return null
+}
+module.exports = minVersion
+
+
+/***/ }),
+
+/***/ 4772:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const SemVer = __nccwpck_require__(4839)
+const Comparator = __nccwpck_require__(863)
+const { ANY } = Comparator
+const Range = __nccwpck_require__(6093)
+const satisfies = __nccwpck_require__(9751)
+const gt = __nccwpck_require__(5283)
+const lt = __nccwpck_require__(6108)
+const lte = __nccwpck_require__(3353)
+const gte = __nccwpck_require__(6064)
+
+const outside = (version, range, hilo, options) => {
+  version = new SemVer(version, options)
+  range = new Range(range, options)
+
+  let gtfn, ltefn, ltfn, comp, ecomp
+  switch (hilo) {
+    case '>':
+      gtfn = gt
+      ltefn = lte
+      ltfn = lt
+      comp = '>'
+      ecomp = '>='
+      break
+    case '<':
+      gtfn = lt
+      ltefn = gte
+      ltfn = gt
+      comp = '<'
+      ecomp = '<='
+      break
+    default:
+      throw new TypeError('Must provide a hilo val of "<" or ">"')
+  }
+
+  // If it satisfies the range it is not outside
+  if (satisfies(version, range, options)) {
+    return false
+  }
+
+  // From now on, variable terms are as if we're in "gtr" mode.
+  // but note that everything is flipped for the "ltr" function.
+
+  for (let i = 0; i < range.set.length; ++i) {
+    const comparators = range.set[i]
+
+    let high = null
+    let low = null
+
+    comparators.forEach((comparator) => {
+      if (comparator.semver === ANY) {
+        comparator = new Comparator('>=0.0.0')
+      }
+      high = high || comparator
+      low = low || comparator
+      if (gtfn(comparator.semver, high.semver, options)) {
+        high = comparator
+      } else if (ltfn(comparator.semver, low.semver, options)) {
+        low = comparator
+      }
+    })
+
+    // If the edge version comparator has a operator then our version
+    // isn't outside it
+    if (high.operator === comp || high.operator === ecomp) {
+      return false
+    }
+
+    // If the lowest version comparator has an operator and our version
+    // is less than it then it isn't higher than the range
+    if ((!low.operator || low.operator === comp) &&
+        ltefn(version, low.semver)) {
+      return false
+    } else if (low.operator === ecomp && ltfn(version, low.semver)) {
+      return false
+    }
+  }
+  return true
+}
+
+module.exports = outside
+
+
+/***/ }),
+
+/***/ 7344:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+// given a set of versions and a range, create a "simplified" range
+// that includes the same versions that the original range does
+// If the original range is shorter than the simplified one, return that.
+const satisfies = __nccwpck_require__(9751)
+const compare = __nccwpck_require__(6625)
+module.exports = (versions, range, options) => {
+  const set = []
+  let first = null
+  let prev = null
+  const v = versions.sort((a, b) => compare(a, b, options))
+  for (const version of v) {
+    const included = satisfies(version, range, options)
+    if (included) {
+      prev = version
+      if (!first) {
+        first = version
+      }
+    } else {
+      if (prev) {
+        set.push([first, prev])
+      }
+      prev = null
+      first = null
+    }
+  }
+  if (first) {
+    set.push([first, null])
+  }
+
+  const ranges = []
+  for (const [min, max] of set) {
+    if (min === max) {
+      ranges.push(min)
+    } else if (!max && min === v[0]) {
+      ranges.push('*')
+    } else if (!max) {
+      ranges.push(`>=${min}`)
+    } else if (min === v[0]) {
+      ranges.push(`<=${max}`)
+    } else {
+      ranges.push(`${min} - ${max}`)
+    }
+  }
+  const simplified = ranges.join(' || ')
+  const original = typeof range.raw === 'string' ? range.raw : String(range)
+  return simplified.length < original.length ? simplified : range
+}
+
+
+/***/ }),
+
+/***/ 4837:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const Range = __nccwpck_require__(6093)
+const Comparator = __nccwpck_require__(863)
+const { ANY } = Comparator
+const satisfies = __nccwpck_require__(9751)
+const compare = __nccwpck_require__(6625)
+
+// Complex range `r1 || r2 || ...` is a subset of `R1 || R2 || ...` iff:
+// - Every simple range `r1, r2, ...` is a null set, OR
+// - Every simple range `r1, r2, ...` which is not a null set is a subset of
+//   some `R1, R2, ...`
+//
+// Simple range `c1 c2 ...` is a subset of simple range `C1 C2 ...` iff:
+// - If c is only the ANY comparator
+//   - If C is only the ANY comparator, return true
+//   - Else if in prerelease mode, return false
+//   - else replace c with `[>=0.0.0]`
+// - If C is only the ANY comparator
+//   - if in prerelease mode, return true
+//   - else replace C with `[>=0.0.0]`
+// - Let EQ be the set of = comparators in c
+// - If EQ is more than one, return true (null set)
+// - Let GT be the highest > or >= comparator in c
+// - Let LT be the lowest < or <= comparator in c
+// - If GT and LT, and GT.semver > LT.semver, return true (null set)
+// - If any C is a = range, and GT or LT are set, return false
+// - If EQ
+//   - If GT, and EQ does not satisfy GT, return true (null set)
+//   - If LT, and EQ does not satisfy LT, return true (null set)
+//   - If EQ satisfies every C, return true
+//   - Else return false
+// - If GT
+//   - If GT.semver is lower than any > or >= comp in C, return false
+//   - If GT is >=, and GT.semver does not satisfy every C, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the GT.semver tuple, return false
+// - If LT
+//   - If LT.semver is greater than any < or <= comp in C, return false
+//   - If LT is <=, and LT.semver does not satisfy every C, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the LT.semver tuple, return false
+// - Else return true
+
+const subset = (sub, dom, options = {}) => {
+  if (sub === dom) {
+    return true
+  }
+
+  sub = new Range(sub, options)
+  dom = new Range(dom, options)
+  let sawNonNull = false
+
+  OUTER: for (const simpleSub of sub.set) {
+    for (const simpleDom of dom.set) {
+      const isSub = simpleSubset(simpleSub, simpleDom, options)
+      sawNonNull = sawNonNull || isSub !== null
+      if (isSub) {
+        continue OUTER
+      }
+    }
+    // the null set is a subset of everything, but null simple ranges in
+    // a complex range should be ignored.  so if we saw a non-null range,
+    // then we know this isn't a subset, but if EVERY simple range was null,
+    // then it is a subset.
+    if (sawNonNull) {
+      return false
+    }
+  }
+  return true
+}
+
+const minimumVersionWithPreRelease = [new Comparator('>=0.0.0-0')]
+const minimumVersion = [new Comparator('>=0.0.0')]
+
+const simpleSubset = (sub, dom, options) => {
+  if (sub === dom) {
+    return true
+  }
+
+  if (sub.length === 1 && sub[0].semver === ANY) {
+    if (dom.length === 1 && dom[0].semver === ANY) {
+      return true
+    } else if (options.includePrerelease) {
+      sub = minimumVersionWithPreRelease
+    } else {
+      sub = minimumVersion
+    }
+  }
+
+  if (dom.length === 1 && dom[0].semver === ANY) {
+    if (options.includePrerelease) {
+      return true
+    } else {
+      dom = minimumVersion
+    }
+  }
+
+  const eqSet = new Set()
+  let gt, lt
+  for (const c of sub) {
+    if (c.operator === '>' || c.operator === '>=') {
+      gt = higherGT(gt, c, options)
+    } else if (c.operator === '<' || c.operator === '<=') {
+      lt = lowerLT(lt, c, options)
+    } else {
+      eqSet.add(c.semver)
+    }
+  }
+
+  if (eqSet.size > 1) {
+    return null
+  }
+
+  let gtltComp
+  if (gt && lt) {
+    gtltComp = compare(gt.semver, lt.semver, options)
+    if (gtltComp > 0) {
+      return null
+    } else if (gtltComp === 0 && (gt.operator !== '>=' || lt.operator !== '<=')) {
+      return null
+    }
+  }
+
+  // will iterate one or zero times
+  for (const eq of eqSet) {
+    if (gt && !satisfies(eq, String(gt), options)) {
+      return null
+    }
+
+    if (lt && !satisfies(eq, String(lt), options)) {
+      return null
+    }
+
+    for (const c of dom) {
+      if (!satisfies(eq, String(c), options)) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  let higher, lower
+  let hasDomLT, hasDomGT
+  // if the subset has a prerelease, we need a comparator in the superset
+  // with the same tuple and a prerelease, or it's not a subset
+  let needDomLTPre = lt &&
+    !options.includePrerelease &&
+    lt.semver.prerelease.length ? lt.semver : false
+  let needDomGTPre = gt &&
+    !options.includePrerelease &&
+    gt.semver.prerelease.length ? gt.semver : false
+  // exception: <1.2.3-0 is the same as <1.2.3
+  if (needDomLTPre && needDomLTPre.prerelease.length === 1 &&
+      lt.operator === '<' && needDomLTPre.prerelease[0] === 0) {
+    needDomLTPre = false
+  }
+
+  for (const c of dom) {
+    hasDomGT = hasDomGT || c.operator === '>' || c.operator === '>='
+    hasDomLT = hasDomLT || c.operator === '<' || c.operator === '<='
+    if (gt) {
+      if (needDomGTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomGTPre.major &&
+            c.semver.minor === needDomGTPre.minor &&
+            c.semver.patch === needDomGTPre.patch) {
+          needDomGTPre = false
+        }
+      }
+      if (c.operator === '>' || c.operator === '>=') {
+        higher = higherGT(gt, c, options)
+        if (higher === c && higher !== gt) {
+          return false
+        }
+      } else if (gt.operator === '>=' && !satisfies(gt.semver, String(c), options)) {
+        return false
+      }
+    }
+    if (lt) {
+      if (needDomLTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomLTPre.major &&
+            c.semver.minor === needDomLTPre.minor &&
+            c.semver.patch === needDomLTPre.patch) {
+          needDomLTPre = false
+        }
+      }
+      if (c.operator === '<' || c.operator === '<=') {
+        lower = lowerLT(lt, c, options)
+        if (lower === c && lower !== lt) {
+          return false
+        }
+      } else if (lt.operator === '<=' && !satisfies(lt.semver, String(c), options)) {
+        return false
+      }
+    }
+    if (!c.operator && (lt || gt) && gtltComp !== 0) {
+      return false
+    }
+  }
+
+  // if there was a < or >, and nothing in the dom, then must be false
+  // UNLESS it was limited by another range in the other direction.
+  // Eg, >1.0.0 <1.0.1 is still a subset of <2.0.0
+  if (gt && hasDomLT && !lt && gtltComp !== 0) {
+    return false
+  }
+
+  if (lt && hasDomGT && !gt && gtltComp !== 0) {
+    return false
+  }
+
+  // we needed a prerelease range in a specific tuple, but didn't get one
+  // then this isn't a subset.  eg >=1.2.3-pre is not a subset of >=1.0.0,
+  // because it includes prereleases in the 1.2.3 tuple
+  if (needDomGTPre || needDomLTPre) {
+    return false
+  }
+
+  return true
+}
+
+// >=1.2.3 is lower than >1.2.3
+const higherGT = (a, b, options) => {
+  if (!a) {
+    return b
+  }
+  const comp = compare(a.semver, b.semver, options)
+  return comp > 0 ? a
+    : comp < 0 ? b
+    : b.operator === '>' && a.operator === '>=' ? b
+    : a
+}
+
+// <=1.2.3 is higher than <1.2.3
+const lowerLT = (a, b, options) => {
+  if (!a) {
+    return b
+  }
+  const comp = compare(a.semver, b.semver, options)
+  return comp < 0 ? a
+    : comp > 0 ? b
+    : b.operator === '<' && a.operator === '<=' ? b
+    : a
+}
+
+module.exports = subset
+
+
+/***/ }),
+
+/***/ 2258:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const Range = __nccwpck_require__(6093)
+
+// Mostly just for testing and legacy API reasons
+const toComparators = (range, options) =>
+  new Range(range, options).set
+    .map(comp => comp.map(c => c.value).join(' ').trim().split(' '))
+
+module.exports = toComparators
+
+
+/***/ }),
+
+/***/ 8733:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+const Range = __nccwpck_require__(6093)
+const validRange = (range, options) => {
+  try {
+    // Return '*' instead of '' so that truthiness works.
+    // This will throw if it's invalid anyway
+    return new Range(range, options).range || '*'
+  } catch (er) {
+    return null
+  }
+}
+module.exports = validRange
+
+
+/***/ }),
+
 /***/ 6874:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -40163,2163 +42814,14 @@ class FileProcessor {
 
 /***/ }),
 
-/***/ 4359:
+/***/ 4960:
 /***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require__) => {
 
-
-// EXPORTS
-__nccwpck_require__.d(__webpack_exports__, {
-  D: () => (/* binding */ HangarClient)
-});
-
-;// CONCATENATED MODULE: external "node:http"
-const external_node_http_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http");
-;// CONCATENATED MODULE: external "node:https"
-const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
-;// CONCATENATED MODULE: external "node:zlib"
-const external_node_zlib_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:zlib");
-// EXTERNAL MODULE: external "node:stream"
-var external_node_stream_ = __nccwpck_require__(7075);
-;// CONCATENATED MODULE: external "node:buffer"
-const external_node_buffer_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:buffer");
-;// CONCATENATED MODULE: ./node_modules/.pnpm/data-uri-to-buffer@4.0.1/node_modules/data-uri-to-buffer/dist/index.js
-/**
- * Returns a `Buffer` instance from the given data URI `uri`.
- *
- * @param {String} uri Data URI to turn into a Buffer instance
- * @returns {Buffer} Buffer instance from Data URI
- * @api public
- */
-function dataUriToBuffer(uri) {
-    if (!/^data:/i.test(uri)) {
-        throw new TypeError('`uri` does not appear to be a Data URI (must begin with "data:")');
-    }
-    // strip newlines
-    uri = uri.replace(/\r?\n/g, '');
-    // split the URI up into the "metadata" and the "data" portions
-    const firstComma = uri.indexOf(',');
-    if (firstComma === -1 || firstComma <= 4) {
-        throw new TypeError('malformed data: URI');
-    }
-    // remove the "data:" scheme and parse the metadata
-    const meta = uri.substring(5, firstComma).split(';');
-    let charset = '';
-    let base64 = false;
-    const type = meta[0] || 'text/plain';
-    let typeFull = type;
-    for (let i = 1; i < meta.length; i++) {
-        if (meta[i] === 'base64') {
-            base64 = true;
-        }
-        else if (meta[i]) {
-            typeFull += `;${meta[i]}`;
-            if (meta[i].indexOf('charset=') === 0) {
-                charset = meta[i].substring(8);
-            }
-        }
-    }
-    // defaults to US-ASCII only if type is not provided
-    if (!meta[0] && !charset.length) {
-        typeFull += ';charset=US-ASCII';
-        charset = 'US-ASCII';
-    }
-    // get the encoded data portion and decode URI-encoded chars
-    const encoding = base64 ? 'base64' : 'ascii';
-    const data = unescape(uri.substring(firstComma + 1));
-    const buffer = Buffer.from(data, encoding);
-    // set `.type` and `.typeFull` properties to MIME type
-    buffer.type = type;
-    buffer.typeFull = typeFull;
-    // set the `.charset` property
-    buffer.charset = charset;
-    return buffer;
-}
-/* harmony default export */ const dist = (dataUriToBuffer);
-//# sourceMappingURL=index.js.map
-// EXTERNAL MODULE: external "node:util"
-var external_node_util_ = __nccwpck_require__(7975);
-// EXTERNAL MODULE: ./node_modules/.pnpm/fetch-blob@3.2.0/node_modules/fetch-blob/index.js
-var fetch_blob = __nccwpck_require__(3178);
-// EXTERNAL MODULE: ./node_modules/.pnpm/formdata-polyfill@4.0.10/node_modules/formdata-polyfill/esm.min.js
-var esm_min = __nccwpck_require__(8369);
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/base.js
-class FetchBaseError extends Error {
-	constructor(message, type) {
-		super(message);
-		// Hide custom error implementation details from end-users
-		Error.captureStackTrace(this, this.constructor);
-
-		this.type = type;
-	}
-
-	get name() {
-		return this.constructor.name;
-	}
-
-	get [Symbol.toStringTag]() {
-		return this.constructor.name;
-	}
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/fetch-error.js
-
-
-
-/**
- * @typedef {{ address?: string, code: string, dest?: string, errno: number, info?: object, message: string, path?: string, port?: number, syscall: string}} SystemError
-*/
-
-/**
- * FetchError interface for operational errors
- */
-class FetchError extends FetchBaseError {
-	/**
-	 * @param  {string} message -      Error message for human
-	 * @param  {string} [type] -        Error type for machine
-	 * @param  {SystemError} [systemError] - For Node.js system error
-	 */
-	constructor(message, type, systemError) {
-		super(message, type);
-		// When err.type is `system`, err.erroredSysCall contains system error and err.code contains system error code
-		if (systemError) {
-			// eslint-disable-next-line no-multi-assign
-			this.code = this.errno = systemError.code;
-			this.erroredSysCall = systemError.syscall;
-		}
-	}
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/is.js
-/**
- * Is.js
- *
- * Object type checks.
- */
-
-const NAME = Symbol.toStringTag;
-
-/**
- * Check if `obj` is a URLSearchParams object
- * ref: https://github.com/node-fetch/node-fetch/issues/296#issuecomment-307598143
- * @param {*} object - Object to check for
- * @return {boolean}
- */
-const isURLSearchParameters = object => {
-	return (
-		typeof object === 'object' &&
-		typeof object.append === 'function' &&
-		typeof object.delete === 'function' &&
-		typeof object.get === 'function' &&
-		typeof object.getAll === 'function' &&
-		typeof object.has === 'function' &&
-		typeof object.set === 'function' &&
-		typeof object.sort === 'function' &&
-		object[NAME] === 'URLSearchParams'
-	);
-};
-
-/**
- * Check if `object` is a W3C `Blob` object (which `File` inherits from)
- * @param {*} object - Object to check for
- * @return {boolean}
- */
-const isBlob = object => {
-	return (
-		object &&
-		typeof object === 'object' &&
-		typeof object.arrayBuffer === 'function' &&
-		typeof object.type === 'string' &&
-		typeof object.stream === 'function' &&
-		typeof object.constructor === 'function' &&
-		/^(Blob|File)$/.test(object[NAME])
-	);
-};
-
-/**
- * Check if `obj` is an instance of AbortSignal.
- * @param {*} object - Object to check for
- * @return {boolean}
- */
-const isAbortSignal = object => {
-	return (
-		typeof object === 'object' && (
-			object[NAME] === 'AbortSignal' ||
-			object[NAME] === 'EventTarget'
-		)
-	);
-};
-
-/**
- * isDomainOrSubdomain reports whether sub is a subdomain (or exact match) of
- * the parent domain.
- *
- * Both domains must already be in canonical form.
- * @param {string|URL} original
- * @param {string|URL} destination
- */
-const isDomainOrSubdomain = (destination, original) => {
-	const orig = new URL(original).hostname;
-	const dest = new URL(destination).hostname;
-
-	return orig === dest || orig.endsWith(`.${dest}`);
-};
-
-/**
- * isSameProtocol reports whether the two provided URLs use the same protocol.
- *
- * Both domains must already be in canonical form.
- * @param {string|URL} original
- * @param {string|URL} destination
- */
-const isSameProtocol = (destination, original) => {
-	const orig = new URL(original).protocol;
-	const dest = new URL(destination).protocol;
-
-	return orig === dest;
-};
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/body.js
-
-/**
- * Body.js
- *
- * Body interface provides common methods for Request and Response
- */
-
-
-
-
-
-
-
-
-
-
-
-
-const pipeline = (0,external_node_util_.promisify)(external_node_stream_.pipeline);
-const INTERNALS = Symbol('Body internals');
-
-/**
- * Body mixin
- *
- * Ref: https://fetch.spec.whatwg.org/#body
- *
- * @param   Stream  body  Readable stream
- * @param   Object  opts  Response options
- * @return  Void
- */
-class Body {
-	constructor(body, {
-		size = 0
-	} = {}) {
-		let boundary = null;
-
-		if (body === null) {
-			// Body is undefined or null
-			body = null;
-		} else if (isURLSearchParameters(body)) {
-			// Body is a URLSearchParams
-			body = external_node_buffer_namespaceObject.Buffer.from(body.toString());
-		} else if (isBlob(body)) {
-			// Body is blob
-		} else if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
-			// Body is Buffer
-		} else if (external_node_util_.types.isAnyArrayBuffer(body)) {
-			// Body is ArrayBuffer
-			body = external_node_buffer_namespaceObject.Buffer.from(body);
-		} else if (ArrayBuffer.isView(body)) {
-			// Body is ArrayBufferView
-			body = external_node_buffer_namespaceObject.Buffer.from(body.buffer, body.byteOffset, body.byteLength);
-		} else if (body instanceof external_node_stream_) {
-			// Body is stream
-		} else if (body instanceof esm_min/* FormData */.fS) {
-			// Body is FormData
-			body = (0,esm_min/* formDataToBlob */.$n)(body);
-			boundary = body.type.split('=')[1];
-		} else {
-			// None of the above
-			// coerce to string then buffer
-			body = external_node_buffer_namespaceObject.Buffer.from(String(body));
-		}
-
-		let stream = body;
-
-		if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
-			stream = external_node_stream_.Readable.from(body);
-		} else if (isBlob(body)) {
-			stream = external_node_stream_.Readable.from(body.stream());
-		}
-
-		this[INTERNALS] = {
-			body,
-			stream,
-			boundary,
-			disturbed: false,
-			error: null
-		};
-		this.size = size;
-
-		if (body instanceof external_node_stream_) {
-			body.on('error', error_ => {
-				const error = error_ instanceof FetchBaseError ?
-					error_ :
-					new FetchError(`Invalid response body while trying to fetch ${this.url}: ${error_.message}`, 'system', error_);
-				this[INTERNALS].error = error;
-			});
-		}
-	}
-
-	get body() {
-		return this[INTERNALS].stream;
-	}
-
-	get bodyUsed() {
-		return this[INTERNALS].disturbed;
-	}
-
-	/**
-	 * Decode response as ArrayBuffer
-	 *
-	 * @return  Promise
-	 */
-	async arrayBuffer() {
-		const {buffer, byteOffset, byteLength} = await consumeBody(this);
-		return buffer.slice(byteOffset, byteOffset + byteLength);
-	}
-
-	async formData() {
-		const ct = this.headers.get('content-type');
-
-		if (ct.startsWith('application/x-www-form-urlencoded')) {
-			const formData = new esm_min/* FormData */.fS();
-			const parameters = new URLSearchParams(await this.text());
-
-			for (const [name, value] of parameters) {
-				formData.append(name, value);
-			}
-
-			return formData;
-		}
-
-		const {toFormData} = await __nccwpck_require__.e(/* import() */ 886).then(__nccwpck_require__.bind(__nccwpck_require__, 4886));
-		return toFormData(this.body, ct);
-	}
-
-	/**
-	 * Return raw response as Blob
-	 *
-	 * @return Promise
-	 */
-	async blob() {
-		const ct = (this.headers && this.headers.get('content-type')) || (this[INTERNALS].body && this[INTERNALS].body.type) || '';
-		const buf = await this.arrayBuffer();
-
-		return new fetch_blob/* default */.A([buf], {
-			type: ct
-		});
-	}
-
-	/**
-	 * Decode response as json
-	 *
-	 * @return  Promise
-	 */
-	async json() {
-		const text = await this.text();
-		return JSON.parse(text);
-	}
-
-	/**
-	 * Decode response as text
-	 *
-	 * @return  Promise
-	 */
-	async text() {
-		const buffer = await consumeBody(this);
-		return new TextDecoder().decode(buffer);
-	}
-
-	/**
-	 * Decode response as buffer (non-spec api)
-	 *
-	 * @return  Promise
-	 */
-	buffer() {
-		return consumeBody(this);
-	}
-}
-
-Body.prototype.buffer = (0,external_node_util_.deprecate)(Body.prototype.buffer, 'Please use \'response.arrayBuffer()\' instead of \'response.buffer()\'', 'node-fetch#buffer');
-
-// In browsers, all properties are enumerable.
-Object.defineProperties(Body.prototype, {
-	body: {enumerable: true},
-	bodyUsed: {enumerable: true},
-	arrayBuffer: {enumerable: true},
-	blob: {enumerable: true},
-	json: {enumerable: true},
-	text: {enumerable: true},
-	data: {get: (0,external_node_util_.deprecate)(() => {},
-		'data doesn\'t exist, use json(), text(), arrayBuffer(), or body instead',
-		'https://github.com/node-fetch/node-fetch/issues/1000 (response)')}
-});
-
-/**
- * Consume and convert an entire Body to a Buffer.
- *
- * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
- *
- * @return Promise
- */
-async function consumeBody(data) {
-	if (data[INTERNALS].disturbed) {
-		throw new TypeError(`body used already for: ${data.url}`);
-	}
-
-	data[INTERNALS].disturbed = true;
-
-	if (data[INTERNALS].error) {
-		throw data[INTERNALS].error;
-	}
-
-	const {body} = data;
-
-	// Body is null
-	if (body === null) {
-		return external_node_buffer_namespaceObject.Buffer.alloc(0);
-	}
-
-	/* c8 ignore next 3 */
-	if (!(body instanceof external_node_stream_)) {
-		return external_node_buffer_namespaceObject.Buffer.alloc(0);
-	}
-
-	// Body is stream
-	// get ready to actually consume the body
-	const accum = [];
-	let accumBytes = 0;
-
-	try {
-		for await (const chunk of body) {
-			if (data.size > 0 && accumBytes + chunk.length > data.size) {
-				const error = new FetchError(`content size at ${data.url} over limit: ${data.size}`, 'max-size');
-				body.destroy(error);
-				throw error;
-			}
-
-			accumBytes += chunk.length;
-			accum.push(chunk);
-		}
-	} catch (error) {
-		const error_ = error instanceof FetchBaseError ? error : new FetchError(`Invalid response body while trying to fetch ${data.url}: ${error.message}`, 'system', error);
-		throw error_;
-	}
-
-	if (body.readableEnded === true || body._readableState.ended === true) {
-		try {
-			if (accum.every(c => typeof c === 'string')) {
-				return external_node_buffer_namespaceObject.Buffer.from(accum.join(''));
-			}
-
-			return external_node_buffer_namespaceObject.Buffer.concat(accum, accumBytes);
-		} catch (error) {
-			throw new FetchError(`Could not create Buffer from response body for ${data.url}: ${error.message}`, 'system', error);
-		}
-	} else {
-		throw new FetchError(`Premature close of server response while trying to fetch ${data.url}`);
-	}
-}
-
-/**
- * Clone body given Res/Req instance
- *
- * @param   Mixed   instance       Response or Request instance
- * @param   String  highWaterMark  highWaterMark for both PassThrough body streams
- * @return  Mixed
- */
-const clone = (instance, highWaterMark) => {
-	let p1;
-	let p2;
-	let {body} = instance[INTERNALS];
-
-	// Don't allow cloning a used body
-	if (instance.bodyUsed) {
-		throw new Error('cannot clone body after it is used');
-	}
-
-	// Check that body is a stream and not form-data object
-	// note: we can't clone the form-data object without having it as a dependency
-	if ((body instanceof external_node_stream_) && (typeof body.getBoundary !== 'function')) {
-		// Tee instance body
-		p1 = new external_node_stream_.PassThrough({highWaterMark});
-		p2 = new external_node_stream_.PassThrough({highWaterMark});
-		body.pipe(p1);
-		body.pipe(p2);
-		// Set instance body to teed body and return the other teed body
-		instance[INTERNALS].stream = p1;
-		body = p2;
-	}
-
-	return body;
-};
-
-const getNonSpecFormDataBoundary = (0,external_node_util_.deprecate)(
-	body => body.getBoundary(),
-	'form-data doesn\'t follow the spec and requires special treatment. Use alternative package',
-	'https://github.com/node-fetch/node-fetch/issues/1167'
-);
-
-/**
- * Performs the operation "extract a `Content-Type` value from |object|" as
- * specified in the specification:
- * https://fetch.spec.whatwg.org/#concept-bodyinit-extract
- *
- * This function assumes that instance.body is present.
- *
- * @param {any} body Any options.body input
- * @returns {string | null}
- */
-const extractContentType = (body, request) => {
-	// Body is null or undefined
-	if (body === null) {
-		return null;
-	}
-
-	// Body is string
-	if (typeof body === 'string') {
-		return 'text/plain;charset=UTF-8';
-	}
-
-	// Body is a URLSearchParams
-	if (isURLSearchParameters(body)) {
-		return 'application/x-www-form-urlencoded;charset=UTF-8';
-	}
-
-	// Body is blob
-	if (isBlob(body)) {
-		return body.type || null;
-	}
-
-	// Body is a Buffer (Buffer, ArrayBuffer or ArrayBufferView)
-	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body) || external_node_util_.types.isAnyArrayBuffer(body) || ArrayBuffer.isView(body)) {
-		return null;
-	}
-
-	if (body instanceof esm_min/* FormData */.fS) {
-		return `multipart/form-data; boundary=${request[INTERNALS].boundary}`;
-	}
-
-	// Detect form data input from form-data module
-	if (body && typeof body.getBoundary === 'function') {
-		return `multipart/form-data;boundary=${getNonSpecFormDataBoundary(body)}`;
-	}
-
-	// Body is stream - can't really do much about this
-	if (body instanceof external_node_stream_) {
-		return null;
-	}
-
-	// Body constructor defaults other things to string
-	return 'text/plain;charset=UTF-8';
-};
-
-/**
- * The Fetch Standard treats this as if "total bytes" is a property on the body.
- * For us, we have to explicitly get it with a function.
- *
- * ref: https://fetch.spec.whatwg.org/#concept-body-total-bytes
- *
- * @param {any} obj.body Body object from the Body instance.
- * @returns {number | null}
- */
-const getTotalBytes = request => {
-	const {body} = request[INTERNALS];
-
-	// Body is null or undefined
-	if (body === null) {
-		return 0;
-	}
-
-	// Body is Blob
-	if (isBlob(body)) {
-		return body.size;
-	}
-
-	// Body is Buffer
-	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
-		return body.length;
-	}
-
-	// Detect form data input from form-data module
-	if (body && typeof body.getLengthSync === 'function') {
-		return body.hasKnownLength && body.hasKnownLength() ? body.getLengthSync() : null;
-	}
-
-	// Body is stream
-	return null;
-};
-
-/**
- * Write a Body to a Node.js WritableStream (e.g. http.Request) object.
- *
- * @param {Stream.Writable} dest The stream to write to.
- * @param obj.body Body object from the Body instance.
- * @returns {Promise<void>}
- */
-const writeToStream = async (dest, {body}) => {
-	if (body === null) {
-		// Body is null
-		dest.end();
-	} else {
-		// Body is stream
-		await pipeline(body, dest);
-	}
-};
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/headers.js
-/**
- * Headers.js
- *
- * Headers class offers convenient helpers
- */
-
-
-
-
-/* c8 ignore next 9 */
-const validateHeaderName = typeof external_node_http_namespaceObject.validateHeaderName === 'function' ?
-	external_node_http_namespaceObject.validateHeaderName :
-	name => {
-		if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(name)) {
-			const error = new TypeError(`Header name must be a valid HTTP token [${name}]`);
-			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_HTTP_TOKEN'});
-			throw error;
-		}
-	};
-
-/* c8 ignore next 9 */
-const validateHeaderValue = typeof external_node_http_namespaceObject.validateHeaderValue === 'function' ?
-	external_node_http_namespaceObject.validateHeaderValue :
-	(name, value) => {
-		if (/[^\t\u0020-\u007E\u0080-\u00FF]/.test(value)) {
-			const error = new TypeError(`Invalid character in header content ["${name}"]`);
-			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_CHAR'});
-			throw error;
-		}
-	};
-
-/**
- * @typedef {Headers | Record<string, string> | Iterable<readonly [string, string]> | Iterable<Iterable<string>>} HeadersInit
- */
-
-/**
- * This Fetch API interface allows you to perform various actions on HTTP request and response headers.
- * These actions include retrieving, setting, adding to, and removing.
- * A Headers object has an associated header list, which is initially empty and consists of zero or more name and value pairs.
- * You can add to this using methods like append() (see Examples.)
- * In all methods of this interface, header names are matched by case-insensitive byte sequence.
- *
- */
-class Headers extends URLSearchParams {
-	/**
-	 * Headers class
-	 *
-	 * @constructor
-	 * @param {HeadersInit} [init] - Response headers
-	 */
-	constructor(init) {
-		// Validate and normalize init object in [name, value(s)][]
-		/** @type {string[][]} */
-		let result = [];
-		if (init instanceof Headers) {
-			const raw = init.raw();
-			for (const [name, values] of Object.entries(raw)) {
-				result.push(...values.map(value => [name, value]));
-			}
-		} else if (init == null) { // eslint-disable-line no-eq-null, eqeqeq
-			// No op
-		} else if (typeof init === 'object' && !external_node_util_.types.isBoxedPrimitive(init)) {
-			const method = init[Symbol.iterator];
-			// eslint-disable-next-line no-eq-null, eqeqeq
-			if (method == null) {
-				// Record<ByteString, ByteString>
-				result.push(...Object.entries(init));
-			} else {
-				if (typeof method !== 'function') {
-					throw new TypeError('Header pairs must be iterable');
-				}
-
-				// Sequence<sequence<ByteString>>
-				// Note: per spec we have to first exhaust the lists then process them
-				result = [...init]
-					.map(pair => {
-						if (
-							typeof pair !== 'object' || external_node_util_.types.isBoxedPrimitive(pair)
-						) {
-							throw new TypeError('Each header pair must be an iterable object');
-						}
-
-						return [...pair];
-					}).map(pair => {
-						if (pair.length !== 2) {
-							throw new TypeError('Each header pair must be a name/value tuple');
-						}
-
-						return [...pair];
-					});
-			}
-		} else {
-			throw new TypeError('Failed to construct \'Headers\': The provided value is not of type \'(sequence<sequence<ByteString>> or record<ByteString, ByteString>)');
-		}
-
-		// Validate and lowercase
-		result =
-			result.length > 0 ?
-				result.map(([name, value]) => {
-					validateHeaderName(name);
-					validateHeaderValue(name, String(value));
-					return [String(name).toLowerCase(), String(value)];
-				}) :
-				undefined;
-
-		super(result);
-
-		// Returning a Proxy that will lowercase key names, validate parameters and sort keys
-		// eslint-disable-next-line no-constructor-return
-		return new Proxy(this, {
-			get(target, p, receiver) {
-				switch (p) {
-					case 'append':
-					case 'set':
-						return (name, value) => {
-							validateHeaderName(name);
-							validateHeaderValue(name, String(value));
-							return URLSearchParams.prototype[p].call(
-								target,
-								String(name).toLowerCase(),
-								String(value)
-							);
-						};
-
-					case 'delete':
-					case 'has':
-					case 'getAll':
-						return name => {
-							validateHeaderName(name);
-							return URLSearchParams.prototype[p].call(
-								target,
-								String(name).toLowerCase()
-							);
-						};
-
-					case 'keys':
-						return () => {
-							target.sort();
-							return new Set(URLSearchParams.prototype.keys.call(target)).keys();
-						};
-
-					default:
-						return Reflect.get(target, p, receiver);
-				}
-			}
-		});
-		/* c8 ignore next */
-	}
-
-	get [Symbol.toStringTag]() {
-		return this.constructor.name;
-	}
-
-	toString() {
-		return Object.prototype.toString.call(this);
-	}
-
-	get(name) {
-		const values = this.getAll(name);
-		if (values.length === 0) {
-			return null;
-		}
-
-		let value = values.join(', ');
-		if (/^content-encoding$/i.test(name)) {
-			value = value.toLowerCase();
-		}
-
-		return value;
-	}
-
-	forEach(callback, thisArg = undefined) {
-		for (const name of this.keys()) {
-			Reflect.apply(callback, thisArg, [this.get(name), name, this]);
-		}
-	}
-
-	* values() {
-		for (const name of this.keys()) {
-			yield this.get(name);
-		}
-	}
-
-	/**
-	 * @type {() => IterableIterator<[string, string]>}
-	 */
-	* entries() {
-		for (const name of this.keys()) {
-			yield [name, this.get(name)];
-		}
-	}
-
-	[Symbol.iterator]() {
-		return this.entries();
-	}
-
-	/**
-	 * Node-fetch non-spec method
-	 * returning all headers and their values as array
-	 * @returns {Record<string, string[]>}
-	 */
-	raw() {
-		return [...this.keys()].reduce((result, key) => {
-			result[key] = this.getAll(key);
-			return result;
-		}, {});
-	}
-
-	/**
-	 * For better console.log(headers) and also to convert Headers into Node.js Request compatible format
-	 */
-	[Symbol.for('nodejs.util.inspect.custom')]() {
-		return [...this.keys()].reduce((result, key) => {
-			const values = this.getAll(key);
-			// Http.request() only supports string as Host header.
-			// This hack makes specifying custom Host header possible.
-			if (key === 'host') {
-				result[key] = values[0];
-			} else {
-				result[key] = values.length > 1 ? values : values[0];
-			}
-
-			return result;
-		}, {});
-	}
-}
-
-/**
- * Re-shaping object for Web IDL tests
- * Only need to do it for overridden methods
- */
-Object.defineProperties(
-	Headers.prototype,
-	['get', 'entries', 'forEach', 'values'].reduce((result, property) => {
-		result[property] = {enumerable: true};
-		return result;
-	}, {})
-);
-
-/**
- * Create a Headers object from an http.IncomingMessage.rawHeaders, ignoring those that do
- * not conform to HTTP grammar productions.
- * @param {import('http').IncomingMessage['rawHeaders']} headers
- */
-function fromRawHeaders(headers = []) {
-	return new Headers(
-		headers
-			// Split into pairs
-			.reduce((result, value, index, array) => {
-				if (index % 2 === 0) {
-					result.push(array.slice(index, index + 2));
-				}
-
-				return result;
-			}, [])
-			.filter(([name, value]) => {
-				try {
-					validateHeaderName(name);
-					validateHeaderValue(name, String(value));
-					return true;
-				} catch {
-					return false;
-				}
-			})
-
-	);
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/is-redirect.js
-const redirectStatus = new Set([301, 302, 303, 307, 308]);
-
-/**
- * Redirect code matching
- *
- * @param {number} code - Status code
- * @return {boolean}
- */
-const isRedirect = code => {
-	return redirectStatus.has(code);
-};
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/response.js
-/**
- * Response.js
- *
- * Response class provides content decoding
- */
-
-
-
-
-
-const response_INTERNALS = Symbol('Response internals');
-
-/**
- * Response class
- *
- * Ref: https://fetch.spec.whatwg.org/#response-class
- *
- * @param   Stream  body  Readable stream
- * @param   Object  opts  Response options
- * @return  Void
- */
-class Response extends Body {
-	constructor(body = null, options = {}) {
-		super(body, options);
-
-		// eslint-disable-next-line no-eq-null, eqeqeq, no-negated-condition
-		const status = options.status != null ? options.status : 200;
-
-		const headers = new Headers(options.headers);
-
-		if (body !== null && !headers.has('Content-Type')) {
-			const contentType = extractContentType(body, this);
-			if (contentType) {
-				headers.append('Content-Type', contentType);
-			}
-		}
-
-		this[response_INTERNALS] = {
-			type: 'default',
-			url: options.url,
-			status,
-			statusText: options.statusText || '',
-			headers,
-			counter: options.counter,
-			highWaterMark: options.highWaterMark
-		};
-	}
-
-	get type() {
-		return this[response_INTERNALS].type;
-	}
-
-	get url() {
-		return this[response_INTERNALS].url || '';
-	}
-
-	get status() {
-		return this[response_INTERNALS].status;
-	}
-
-	/**
-	 * Convenience property representing if the request ended normally
-	 */
-	get ok() {
-		return this[response_INTERNALS].status >= 200 && this[response_INTERNALS].status < 300;
-	}
-
-	get redirected() {
-		return this[response_INTERNALS].counter > 0;
-	}
-
-	get statusText() {
-		return this[response_INTERNALS].statusText;
-	}
-
-	get headers() {
-		return this[response_INTERNALS].headers;
-	}
-
-	get highWaterMark() {
-		return this[response_INTERNALS].highWaterMark;
-	}
-
-	/**
-	 * Clone this response
-	 *
-	 * @return  Response
-	 */
-	clone() {
-		return new Response(clone(this, this.highWaterMark), {
-			type: this.type,
-			url: this.url,
-			status: this.status,
-			statusText: this.statusText,
-			headers: this.headers,
-			ok: this.ok,
-			redirected: this.redirected,
-			size: this.size,
-			highWaterMark: this.highWaterMark
-		});
-	}
-
-	/**
-	 * @param {string} url    The URL that the new response is to originate from.
-	 * @param {number} status An optional status code for the response (e.g., 302.)
-	 * @returns {Response}    A Response object.
-	 */
-	static redirect(url, status = 302) {
-		if (!isRedirect(status)) {
-			throw new RangeError('Failed to execute "redirect" on "response": Invalid status code');
-		}
-
-		return new Response(null, {
-			headers: {
-				location: new URL(url).toString()
-			},
-			status
-		});
-	}
-
-	static error() {
-		const response = new Response(null, {status: 0, statusText: ''});
-		response[response_INTERNALS].type = 'error';
-		return response;
-	}
-
-	static json(data = undefined, init = {}) {
-		const body = JSON.stringify(data);
-
-		if (body === undefined) {
-			throw new TypeError('data is not JSON serializable');
-		}
-
-		const headers = new Headers(init && init.headers);
-
-		if (!headers.has('content-type')) {
-			headers.set('content-type', 'application/json');
-		}
-
-		return new Response(body, {
-			...init,
-			headers
-		});
-	}
-
-	get [Symbol.toStringTag]() {
-		return 'Response';
-	}
-}
-
-Object.defineProperties(Response.prototype, {
-	type: {enumerable: true},
-	url: {enumerable: true},
-	status: {enumerable: true},
-	ok: {enumerable: true},
-	redirected: {enumerable: true},
-	statusText: {enumerable: true},
-	headers: {enumerable: true},
-	clone: {enumerable: true}
-});
-
-;// CONCATENATED MODULE: external "node:url"
-const external_node_url_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/get-search.js
-const getSearch = parsedURL => {
-	if (parsedURL.search) {
-		return parsedURL.search;
-	}
-
-	const lastOffset = parsedURL.href.length - 1;
-	const hash = parsedURL.hash || (parsedURL.href[lastOffset] === '#' ? '#' : '');
-	return parsedURL.href[lastOffset - hash.length] === '?' ? '?' : '';
-};
-
-;// CONCATENATED MODULE: external "node:net"
-const external_node_net_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:net");
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/referrer.js
-
-
-/**
- * @external URL
- * @see {@link https://developer.mozilla.org/en-US/docs/Web/API/URL|URL}
- */
-
-/**
- * @module utils/referrer
- * @private
- */
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#strip-url|Referrer Policy §8.4. Strip url for use as a referrer}
- * @param {string} URL
- * @param {boolean} [originOnly=false]
- */
-function stripURLForUseAsAReferrer(url, originOnly = false) {
-	// 1. If url is null, return no referrer.
-	if (url == null) { // eslint-disable-line no-eq-null, eqeqeq
-		return 'no-referrer';
-	}
-
-	url = new URL(url);
-
-	// 2. If url's scheme is a local scheme, then return no referrer.
-	if (/^(about|blob|data):$/.test(url.protocol)) {
-		return 'no-referrer';
-	}
-
-	// 3. Set url's username to the empty string.
-	url.username = '';
-
-	// 4. Set url's password to null.
-	// Note: `null` appears to be a mistake as this actually results in the password being `"null"`.
-	url.password = '';
-
-	// 5. Set url's fragment to null.
-	// Note: `null` appears to be a mistake as this actually results in the fragment being `"#null"`.
-	url.hash = '';
-
-	// 6. If the origin-only flag is true, then:
-	if (originOnly) {
-		// 6.1. Set url's path to null.
-		// Note: `null` appears to be a mistake as this actually results in the path being `"/null"`.
-		url.pathname = '';
-
-		// 6.2. Set url's query to null.
-		// Note: `null` appears to be a mistake as this actually results in the query being `"?null"`.
-		url.search = '';
-	}
-
-	// 7. Return url.
-	return url;
-}
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#enumdef-referrerpolicy|enum ReferrerPolicy}
- */
-const ReferrerPolicy = new Set([
-	'',
-	'no-referrer',
-	'no-referrer-when-downgrade',
-	'same-origin',
-	'origin',
-	'strict-origin',
-	'origin-when-cross-origin',
-	'strict-origin-when-cross-origin',
-	'unsafe-url'
-]);
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#default-referrer-policy|default referrer policy}
- */
-const DEFAULT_REFERRER_POLICY = 'strict-origin-when-cross-origin';
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#referrer-policies|Referrer Policy §3. Referrer Policies}
- * @param {string} referrerPolicy
- * @returns {string} referrerPolicy
- */
-function validateReferrerPolicy(referrerPolicy) {
-	if (!ReferrerPolicy.has(referrerPolicy)) {
-		throw new TypeError(`Invalid referrerPolicy: ${referrerPolicy}`);
-	}
-
-	return referrerPolicy;
-}
-
-/**
- * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy|Referrer Policy §3.2. Is origin potentially trustworthy?}
- * @param {external:URL} url
- * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
- */
-function isOriginPotentiallyTrustworthy(url) {
-	// 1. If origin is an opaque origin, return "Not Trustworthy".
-	// Not applicable
-
-	// 2. Assert: origin is a tuple origin.
-	// Not for implementations
-
-	// 3. If origin's scheme is either "https" or "wss", return "Potentially Trustworthy".
-	if (/^(http|ws)s:$/.test(url.protocol)) {
-		return true;
-	}
-
-	// 4. If origin's host component matches one of the CIDR notations 127.0.0.0/8 or ::1/128 [RFC4632], return "Potentially Trustworthy".
-	const hostIp = url.host.replace(/(^\[)|(]$)/g, '');
-	const hostIPVersion = (0,external_node_net_namespaceObject.isIP)(hostIp);
-
-	if (hostIPVersion === 4 && /^127\./.test(hostIp)) {
-		return true;
-	}
-
-	if (hostIPVersion === 6 && /^(((0+:){7})|(::(0+:){0,6}))0*1$/.test(hostIp)) {
-		return true;
-	}
-
-	// 5. If origin's host component is "localhost" or falls within ".localhost", and the user agent conforms to the name resolution rules in [let-localhost-be-localhost], return "Potentially Trustworthy".
-	// We are returning FALSE here because we cannot ensure conformance to
-	// let-localhost-be-loalhost (https://tools.ietf.org/html/draft-west-let-localhost-be-localhost)
-	if (url.host === 'localhost' || url.host.endsWith('.localhost')) {
-		return false;
-	}
-
-	// 6. If origin's scheme component is file, return "Potentially Trustworthy".
-	if (url.protocol === 'file:') {
-		return true;
-	}
-
-	// 7. If origin's scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
-	// Not supported
-
-	// 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
-	// Not supported
-
-	// 9. Return "Not Trustworthy".
-	return false;
-}
-
-/**
- * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-url-trustworthy|Referrer Policy §3.3. Is url potentially trustworthy?}
- * @param {external:URL} url
- * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
- */
-function isUrlPotentiallyTrustworthy(url) {
-	// 1. If url is "about:blank" or "about:srcdoc", return "Potentially Trustworthy".
-	if (/^about:(blank|srcdoc)$/.test(url)) {
-		return true;
-	}
-
-	// 2. If url's scheme is "data", return "Potentially Trustworthy".
-	if (url.protocol === 'data:') {
-		return true;
-	}
-
-	// Note: The origin of blob: and filesystem: URLs is the origin of the context in which they were
-	// created. Therefore, blobs created in a trustworthy origin will themselves be potentially
-	// trustworthy.
-	if (/^(blob|filesystem):$/.test(url.protocol)) {
-		return true;
-	}
-
-	// 3. Return the result of executing §3.2 Is origin potentially trustworthy? on url's origin.
-	return isOriginPotentiallyTrustworthy(url);
-}
-
-/**
- * Modifies the referrerURL to enforce any extra security policy considerations.
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
- * @callback module:utils/referrer~referrerURLCallback
- * @param {external:URL} referrerURL
- * @returns {external:URL} modified referrerURL
- */
-
-/**
- * Modifies the referrerOrigin to enforce any extra security policy considerations.
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
- * @callback module:utils/referrer~referrerOriginCallback
- * @param {external:URL} referrerOrigin
- * @returns {external:URL} modified referrerOrigin
- */
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}
- * @param {Request} request
- * @param {object} o
- * @param {module:utils/referrer~referrerURLCallback} o.referrerURLCallback
- * @param {module:utils/referrer~referrerOriginCallback} o.referrerOriginCallback
- * @returns {external:URL} Request's referrer
- */
-function determineRequestsReferrer(request, {referrerURLCallback, referrerOriginCallback} = {}) {
-	// There are 2 notes in the specification about invalid pre-conditions.  We return null, here, for
-	// these cases:
-	// > Note: If request's referrer is "no-referrer", Fetch will not call into this algorithm.
-	// > Note: If request's referrer policy is the empty string, Fetch will not call into this
-	// > algorithm.
-	if (request.referrer === 'no-referrer' || request.referrerPolicy === '') {
-		return null;
-	}
-
-	// 1. Let policy be request's associated referrer policy.
-	const policy = request.referrerPolicy;
-
-	// 2. Let environment be request's client.
-	// not applicable to node.js
-
-	// 3. Switch on request's referrer:
-	if (request.referrer === 'about:client') {
-		return 'no-referrer';
-	}
-
-	// "a URL": Let referrerSource be request's referrer.
-	const referrerSource = request.referrer;
-
-	// 4. Let request's referrerURL be the result of stripping referrerSource for use as a referrer.
-	let referrerURL = stripURLForUseAsAReferrer(referrerSource);
-
-	// 5. Let referrerOrigin be the result of stripping referrerSource for use as a referrer, with the
-	//    origin-only flag set to true.
-	let referrerOrigin = stripURLForUseAsAReferrer(referrerSource, true);
-
-	// 6. If the result of serializing referrerURL is a string whose length is greater than 4096, set
-	//    referrerURL to referrerOrigin.
-	if (referrerURL.toString().length > 4096) {
-		referrerURL = referrerOrigin;
-	}
-
-	// 7. The user agent MAY alter referrerURL or referrerOrigin at this point to enforce arbitrary
-	//    policy considerations in the interests of minimizing data leakage. For example, the user
-	//    agent could strip the URL down to an origin, modify its host, replace it with an empty
-	//    string, etc.
-	if (referrerURLCallback) {
-		referrerURL = referrerURLCallback(referrerURL);
-	}
-
-	if (referrerOriginCallback) {
-		referrerOrigin = referrerOriginCallback(referrerOrigin);
-	}
-
-	// 8.Execute the statements corresponding to the value of policy:
-	const currentURL = new URL(request.url);
-
-	switch (policy) {
-		case 'no-referrer':
-			return 'no-referrer';
-
-		case 'origin':
-			return referrerOrigin;
-
-		case 'unsafe-url':
-			return referrerURL;
-
-		case 'strict-origin':
-			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
-			//    potentially trustworthy URL, then return no referrer.
-			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
-				return 'no-referrer';
-			}
-
-			// 2. Return referrerOrigin.
-			return referrerOrigin.toString();
-
-		case 'strict-origin-when-cross-origin':
-			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
-			//    return referrerURL.
-			if (referrerURL.origin === currentURL.origin) {
-				return referrerURL;
-			}
-
-			// 2. If referrerURL is a potentially trustworthy URL and request's current URL is not a
-			//    potentially trustworthy URL, then return no referrer.
-			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
-				return 'no-referrer';
-			}
-
-			// 3. Return referrerOrigin.
-			return referrerOrigin;
-
-		case 'same-origin':
-			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
-			//    return referrerURL.
-			if (referrerURL.origin === currentURL.origin) {
-				return referrerURL;
-			}
-
-			// 2. Return no referrer.
-			return 'no-referrer';
-
-		case 'origin-when-cross-origin':
-			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
-			//    return referrerURL.
-			if (referrerURL.origin === currentURL.origin) {
-				return referrerURL;
-			}
-
-			// Return referrerOrigin.
-			return referrerOrigin;
-
-		case 'no-referrer-when-downgrade':
-			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
-			//    potentially trustworthy URL, then return no referrer.
-			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
-				return 'no-referrer';
-			}
-
-			// 2. Return referrerURL.
-			return referrerURL;
-
-		default:
-			throw new TypeError(`Invalid referrerPolicy: ${policy}`);
-	}
-}
-
-/**
- * @see {@link https://w3c.github.io/webappsec-referrer-policy/#parse-referrer-policy-from-header|Referrer Policy §8.1. Parse a referrer policy from a Referrer-Policy header}
- * @param {Headers} headers Response headers
- * @returns {string} policy
- */
-function parseReferrerPolicyFromHeader(headers) {
-	// 1. Let policy-tokens be the result of extracting header list values given `Referrer-Policy`
-	//    and response’s header list.
-	const policyTokens = (headers.get('referrer-policy') || '').split(/[,\s]+/);
-
-	// 2. Let policy be the empty string.
-	let policy = '';
-
-	// 3. For each token in policy-tokens, if token is a referrer policy and token is not the empty
-	//    string, then set policy to token.
-	// Note: This algorithm loops over multiple policy values to allow deployment of new policy
-	// values with fallbacks for older user agents, as described in § 11.1 Unknown Policy Values.
-	for (const token of policyTokens) {
-		if (token && ReferrerPolicy.has(token)) {
-			policy = token;
-		}
-	}
-
-	// 4. Return policy.
-	return policy;
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/request.js
-/**
- * Request.js
- *
- * Request class contains server only options
- *
- * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
- */
-
-
-
-
-
-
-
-
-
-const request_INTERNALS = Symbol('Request internals');
-
-/**
- * Check if `obj` is an instance of Request.
- *
- * @param  {*} object
- * @return {boolean}
- */
-const isRequest = object => {
-	return (
-		typeof object === 'object' &&
-		typeof object[request_INTERNALS] === 'object'
-	);
-};
-
-const doBadDataWarn = (0,external_node_util_.deprecate)(() => {},
-	'.data is not a valid RequestInit property, use .body instead',
-	'https://github.com/node-fetch/node-fetch/issues/1000 (request)');
-
-/**
- * Request class
- *
- * Ref: https://fetch.spec.whatwg.org/#request-class
- *
- * @param   Mixed   input  Url or Request instance
- * @param   Object  init   Custom options
- * @return  Void
- */
-class Request extends Body {
-	constructor(input, init = {}) {
-		let parsedURL;
-
-		// Normalize input and force URL to be encoded as UTF-8 (https://github.com/node-fetch/node-fetch/issues/245)
-		if (isRequest(input)) {
-			parsedURL = new URL(input.url);
-		} else {
-			parsedURL = new URL(input);
-			input = {};
-		}
-
-		if (parsedURL.username !== '' || parsedURL.password !== '') {
-			throw new TypeError(`${parsedURL} is an url with embedded credentials.`);
-		}
-
-		let method = init.method || input.method || 'GET';
-		if (/^(delete|get|head|options|post|put)$/i.test(method)) {
-			method = method.toUpperCase();
-		}
-
-		if (!isRequest(init) && 'data' in init) {
-			doBadDataWarn();
-		}
-
-		// eslint-disable-next-line no-eq-null, eqeqeq
-		if ((init.body != null || (isRequest(input) && input.body !== null)) &&
-			(method === 'GET' || method === 'HEAD')) {
-			throw new TypeError('Request with GET/HEAD method cannot have body');
-		}
-
-		const inputBody = init.body ?
-			init.body :
-			(isRequest(input) && input.body !== null ?
-				clone(input) :
-				null);
-
-		super(inputBody, {
-			size: init.size || input.size || 0
-		});
-
-		const headers = new Headers(init.headers || input.headers || {});
-
-		if (inputBody !== null && !headers.has('Content-Type')) {
-			const contentType = extractContentType(inputBody, this);
-			if (contentType) {
-				headers.set('Content-Type', contentType);
-			}
-		}
-
-		let signal = isRequest(input) ?
-			input.signal :
-			null;
-		if ('signal' in init) {
-			signal = init.signal;
-		}
-
-		// eslint-disable-next-line no-eq-null, eqeqeq
-		if (signal != null && !isAbortSignal(signal)) {
-			throw new TypeError('Expected signal to be an instanceof AbortSignal or EventTarget');
-		}
-
-		// §5.4, Request constructor steps, step 15.1
-		// eslint-disable-next-line no-eq-null, eqeqeq
-		let referrer = init.referrer == null ? input.referrer : init.referrer;
-		if (referrer === '') {
-			// §5.4, Request constructor steps, step 15.2
-			referrer = 'no-referrer';
-		} else if (referrer) {
-			// §5.4, Request constructor steps, step 15.3.1, 15.3.2
-			const parsedReferrer = new URL(referrer);
-			// §5.4, Request constructor steps, step 15.3.3, 15.3.4
-			referrer = /^about:(\/\/)?client$/.test(parsedReferrer) ? 'client' : parsedReferrer;
-		} else {
-			referrer = undefined;
-		}
-
-		this[request_INTERNALS] = {
-			method,
-			redirect: init.redirect || input.redirect || 'follow',
-			headers,
-			parsedURL,
-			signal,
-			referrer
-		};
-
-		// Node-fetch-only options
-		this.follow = init.follow === undefined ? (input.follow === undefined ? 20 : input.follow) : init.follow;
-		this.compress = init.compress === undefined ? (input.compress === undefined ? true : input.compress) : init.compress;
-		this.counter = init.counter || input.counter || 0;
-		this.agent = init.agent || input.agent;
-		this.highWaterMark = init.highWaterMark || input.highWaterMark || 16384;
-		this.insecureHTTPParser = init.insecureHTTPParser || input.insecureHTTPParser || false;
-
-		// §5.4, Request constructor steps, step 16.
-		// Default is empty string per https://fetch.spec.whatwg.org/#concept-request-referrer-policy
-		this.referrerPolicy = init.referrerPolicy || input.referrerPolicy || '';
-	}
-
-	/** @returns {string} */
-	get method() {
-		return this[request_INTERNALS].method;
-	}
-
-	/** @returns {string} */
-	get url() {
-		return (0,external_node_url_namespaceObject.format)(this[request_INTERNALS].parsedURL);
-	}
-
-	/** @returns {Headers} */
-	get headers() {
-		return this[request_INTERNALS].headers;
-	}
-
-	get redirect() {
-		return this[request_INTERNALS].redirect;
-	}
-
-	/** @returns {AbortSignal} */
-	get signal() {
-		return this[request_INTERNALS].signal;
-	}
-
-	// https://fetch.spec.whatwg.org/#dom-request-referrer
-	get referrer() {
-		if (this[request_INTERNALS].referrer === 'no-referrer') {
-			return '';
-		}
-
-		if (this[request_INTERNALS].referrer === 'client') {
-			return 'about:client';
-		}
-
-		if (this[request_INTERNALS].referrer) {
-			return this[request_INTERNALS].referrer.toString();
-		}
-
-		return undefined;
-	}
-
-	get referrerPolicy() {
-		return this[request_INTERNALS].referrerPolicy;
-	}
-
-	set referrerPolicy(referrerPolicy) {
-		this[request_INTERNALS].referrerPolicy = validateReferrerPolicy(referrerPolicy);
-	}
-
-	/**
-	 * Clone this request
-	 *
-	 * @return  Request
-	 */
-	clone() {
-		return new Request(this);
-	}
-
-	get [Symbol.toStringTag]() {
-		return 'Request';
-	}
-}
-
-Object.defineProperties(Request.prototype, {
-	method: {enumerable: true},
-	url: {enumerable: true},
-	headers: {enumerable: true},
-	redirect: {enumerable: true},
-	clone: {enumerable: true},
-	signal: {enumerable: true},
-	referrer: {enumerable: true},
-	referrerPolicy: {enumerable: true}
-});
-
-/**
- * Convert a Request to Node.js http request options.
- *
- * @param {Request} request - A Request instance
- * @return The options object to be passed to http.request
- */
-const getNodeRequestOptions = request => {
-	const {parsedURL} = request[request_INTERNALS];
-	const headers = new Headers(request[request_INTERNALS].headers);
-
-	// Fetch step 1.3
-	if (!headers.has('Accept')) {
-		headers.set('Accept', '*/*');
-	}
-
-	// HTTP-network-or-cache fetch steps 2.4-2.7
-	let contentLengthValue = null;
-	if (request.body === null && /^(post|put)$/i.test(request.method)) {
-		contentLengthValue = '0';
-	}
-
-	if (request.body !== null) {
-		const totalBytes = getTotalBytes(request);
-		// Set Content-Length if totalBytes is a number (that is not NaN)
-		if (typeof totalBytes === 'number' && !Number.isNaN(totalBytes)) {
-			contentLengthValue = String(totalBytes);
-		}
-	}
-
-	if (contentLengthValue) {
-		headers.set('Content-Length', contentLengthValue);
-	}
-
-	// 4.1. Main fetch, step 2.6
-	// > If request's referrer policy is the empty string, then set request's referrer policy to the
-	// > default referrer policy.
-	if (request.referrerPolicy === '') {
-		request.referrerPolicy = DEFAULT_REFERRER_POLICY;
-	}
-
-	// 4.1. Main fetch, step 2.7
-	// > If request's referrer is not "no-referrer", set request's referrer to the result of invoking
-	// > determine request's referrer.
-	if (request.referrer && request.referrer !== 'no-referrer') {
-		request[request_INTERNALS].referrer = determineRequestsReferrer(request);
-	} else {
-		request[request_INTERNALS].referrer = 'no-referrer';
-	}
-
-	// 4.5. HTTP-network-or-cache fetch, step 6.9
-	// > If httpRequest's referrer is a URL, then append `Referer`/httpRequest's referrer, serialized
-	// >  and isomorphic encoded, to httpRequest's header list.
-	if (request[request_INTERNALS].referrer instanceof URL) {
-		headers.set('Referer', request.referrer);
-	}
-
-	// HTTP-network-or-cache fetch step 2.11
-	if (!headers.has('User-Agent')) {
-		headers.set('User-Agent', 'node-fetch');
-	}
-
-	// HTTP-network-or-cache fetch step 2.15
-	if (request.compress && !headers.has('Accept-Encoding')) {
-		headers.set('Accept-Encoding', 'gzip, deflate, br');
-	}
-
-	let {agent} = request;
-	if (typeof agent === 'function') {
-		agent = agent(parsedURL);
-	}
-
-	// HTTP-network fetch step 4.2
-	// chunked encoding is handled by Node.js
-
-	const search = getSearch(parsedURL);
-
-	// Pass the full URL directly to request(), but overwrite the following
-	// options:
-	const options = {
-		// Overwrite search to retain trailing ? (issue #776)
-		path: parsedURL.pathname + search,
-		// The following options are not expressed in the URL
-		method: request.method,
-		headers: headers[Symbol.for('nodejs.util.inspect.custom')](),
-		insecureHTTPParser: request.insecureHTTPParser,
-		agent
-	};
-
-	return {
-		/** @type {URL} */
-		parsedURL,
-		options
-	};
-};
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/abort-error.js
-
-
-/**
- * AbortError interface for cancelled requests
- */
-class AbortError extends FetchBaseError {
-	constructor(message, type = 'aborted') {
-		super(message, type);
-	}
-}
-
-// EXTERNAL MODULE: ./node_modules/.pnpm/fetch-blob@3.2.0/node_modules/fetch-blob/from.js + 2 modules
-var from = __nccwpck_require__(6177);
-;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/index.js
-/**
- * Index.js
- *
- * a request API compatible with window.fetch
- *
- * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
- */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const supportedSchemas = new Set(['data:', 'http:', 'https:']);
-
-/**
- * Fetch function
- *
- * @param   {string | URL | import('./request').default} url - Absolute url or Request instance
- * @param   {*} [options_] - Fetch options
- * @return  {Promise<import('./response').default>}
- */
-async function fetch(url, options_) {
-	return new Promise((resolve, reject) => {
-		// Build request object
-		const request = new Request(url, options_);
-		const {parsedURL, options} = getNodeRequestOptions(request);
-		if (!supportedSchemas.has(parsedURL.protocol)) {
-			throw new TypeError(`node-fetch cannot load ${url}. URL scheme "${parsedURL.protocol.replace(/:$/, '')}" is not supported.`);
-		}
-
-		if (parsedURL.protocol === 'data:') {
-			const data = dist(request.url);
-			const response = new Response(data, {headers: {'Content-Type': data.typeFull}});
-			resolve(response);
-			return;
-		}
-
-		// Wrap http.request into fetch
-		const send = (parsedURL.protocol === 'https:' ? external_node_https_namespaceObject : external_node_http_namespaceObject).request;
-		const {signal} = request;
-		let response = null;
-
-		const abort = () => {
-			const error = new AbortError('The operation was aborted.');
-			reject(error);
-			if (request.body && request.body instanceof external_node_stream_.Readable) {
-				request.body.destroy(error);
-			}
-
-			if (!response || !response.body) {
-				return;
-			}
-
-			response.body.emit('error', error);
-		};
-
-		if (signal && signal.aborted) {
-			abort();
-			return;
-		}
-
-		const abortAndFinalize = () => {
-			abort();
-			finalize();
-		};
-
-		// Send request
-		const request_ = send(parsedURL.toString(), options);
-
-		if (signal) {
-			signal.addEventListener('abort', abortAndFinalize);
-		}
-
-		const finalize = () => {
-			request_.abort();
-			if (signal) {
-				signal.removeEventListener('abort', abortAndFinalize);
-			}
-		};
-
-		request_.on('error', error => {
-			reject(new FetchError(`request to ${request.url} failed, reason: ${error.message}`, 'system', error));
-			finalize();
-		});
-
-		fixResponseChunkedTransferBadEnding(request_, error => {
-			if (response && response.body) {
-				response.body.destroy(error);
-			}
-		});
-
-		/* c8 ignore next 18 */
-		if (process.version < 'v14') {
-			// Before Node.js 14, pipeline() does not fully support async iterators and does not always
-			// properly handle when the socket close/end events are out of order.
-			request_.on('socket', s => {
-				let endedWithEventsCount;
-				s.prependListener('end', () => {
-					endedWithEventsCount = s._eventsCount;
-				});
-				s.prependListener('close', hadError => {
-					// if end happened before close but the socket didn't emit an error, do it now
-					if (response && endedWithEventsCount < s._eventsCount && !hadError) {
-						const error = new Error('Premature close');
-						error.code = 'ERR_STREAM_PREMATURE_CLOSE';
-						response.body.emit('error', error);
-					}
-				});
-			});
-		}
-
-		request_.on('response', response_ => {
-			request_.setTimeout(0);
-			const headers = fromRawHeaders(response_.rawHeaders);
-
-			// HTTP fetch step 5
-			if (isRedirect(response_.statusCode)) {
-				// HTTP fetch step 5.2
-				const location = headers.get('Location');
-
-				// HTTP fetch step 5.3
-				let locationURL = null;
-				try {
-					locationURL = location === null ? null : new URL(location, request.url);
-				} catch {
-					// error here can only be invalid URL in Location: header
-					// do not throw when options.redirect == manual
-					// let the user extract the errorneous redirect URL
-					if (request.redirect !== 'manual') {
-						reject(new FetchError(`uri requested responds with an invalid redirect URL: ${location}`, 'invalid-redirect'));
-						finalize();
-						return;
-					}
-				}
-
-				// HTTP fetch step 5.5
-				switch (request.redirect) {
-					case 'error':
-						reject(new FetchError(`uri requested responds with a redirect, redirect mode is set to error: ${request.url}`, 'no-redirect'));
-						finalize();
-						return;
-					case 'manual':
-						// Nothing to do
-						break;
-					case 'follow': {
-						// HTTP-redirect fetch step 2
-						if (locationURL === null) {
-							break;
-						}
-
-						// HTTP-redirect fetch step 5
-						if (request.counter >= request.follow) {
-							reject(new FetchError(`maximum redirect reached at: ${request.url}`, 'max-redirect'));
-							finalize();
-							return;
-						}
-
-						// HTTP-redirect fetch step 6 (counter increment)
-						// Create a new Request object.
-						const requestOptions = {
-							headers: new Headers(request.headers),
-							follow: request.follow,
-							counter: request.counter + 1,
-							agent: request.agent,
-							compress: request.compress,
-							method: request.method,
-							body: clone(request),
-							signal: request.signal,
-							size: request.size,
-							referrer: request.referrer,
-							referrerPolicy: request.referrerPolicy
-						};
-
-						// when forwarding sensitive headers like "Authorization",
-						// "WWW-Authenticate", and "Cookie" to untrusted targets,
-						// headers will be ignored when following a redirect to a domain
-						// that is not a subdomain match or exact match of the initial domain.
-						// For example, a redirect from "foo.com" to either "foo.com" or "sub.foo.com"
-						// will forward the sensitive headers, but a redirect to "bar.com" will not.
-						// headers will also be ignored when following a redirect to a domain using
-						// a different protocol. For example, a redirect from "https://foo.com" to "http://foo.com"
-						// will not forward the sensitive headers
-						if (!isDomainOrSubdomain(request.url, locationURL) || !isSameProtocol(request.url, locationURL)) {
-							for (const name of ['authorization', 'www-authenticate', 'cookie', 'cookie2']) {
-								requestOptions.headers.delete(name);
-							}
-						}
-
-						// HTTP-redirect fetch step 9
-						if (response_.statusCode !== 303 && request.body && options_.body instanceof external_node_stream_.Readable) {
-							reject(new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect'));
-							finalize();
-							return;
-						}
-
-						// HTTP-redirect fetch step 11
-						if (response_.statusCode === 303 || ((response_.statusCode === 301 || response_.statusCode === 302) && request.method === 'POST')) {
-							requestOptions.method = 'GET';
-							requestOptions.body = undefined;
-							requestOptions.headers.delete('content-length');
-						}
-
-						// HTTP-redirect fetch step 14
-						const responseReferrerPolicy = parseReferrerPolicyFromHeader(headers);
-						if (responseReferrerPolicy) {
-							requestOptions.referrerPolicy = responseReferrerPolicy;
-						}
-
-						// HTTP-redirect fetch step 15
-						resolve(fetch(new Request(locationURL, requestOptions)));
-						finalize();
-						return;
-					}
-
-					default:
-						return reject(new TypeError(`Redirect option '${request.redirect}' is not a valid value of RequestRedirect`));
-				}
-			}
-
-			// Prepare response
-			if (signal) {
-				response_.once('end', () => {
-					signal.removeEventListener('abort', abortAndFinalize);
-				});
-			}
-
-			let body = (0,external_node_stream_.pipeline)(response_, new external_node_stream_.PassThrough(), error => {
-				if (error) {
-					reject(error);
-				}
-			});
-			// see https://github.com/nodejs/node/pull/29376
-			/* c8 ignore next 3 */
-			if (process.version < 'v12.10') {
-				response_.on('aborted', abortAndFinalize);
-			}
-
-			const responseOptions = {
-				url: request.url,
-				status: response_.statusCode,
-				statusText: response_.statusMessage,
-				headers,
-				size: request.size,
-				counter: request.counter,
-				highWaterMark: request.highWaterMark
-			};
-
-			// HTTP-network fetch step 12.1.1.3
-			const codings = headers.get('Content-Encoding');
-
-			// HTTP-network fetch step 12.1.1.4: handle content codings
-
-			// in following scenarios we ignore compression support
-			// 1. compression support is disabled
-			// 2. HEAD request
-			// 3. no Content-Encoding header
-			// 4. no content response (204)
-			// 5. content not modified response (304)
-			if (!request.compress || request.method === 'HEAD' || codings === null || response_.statusCode === 204 || response_.statusCode === 304) {
-				response = new Response(body, responseOptions);
-				resolve(response);
-				return;
-			}
-
-			// For Node v6+
-			// Be less strict when decoding compressed responses, since sometimes
-			// servers send slightly invalid responses that are still accepted
-			// by common browsers.
-			// Always using Z_SYNC_FLUSH is what cURL does.
-			const zlibOptions = {
-				flush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH,
-				finishFlush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH
-			};
-
-			// For gzip
-			if (codings === 'gzip' || codings === 'x-gzip') {
-				body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createGunzip(zlibOptions), error => {
-					if (error) {
-						reject(error);
-					}
-				});
-				response = new Response(body, responseOptions);
-				resolve(response);
-				return;
-			}
-
-			// For deflate
-			if (codings === 'deflate' || codings === 'x-deflate') {
-				// Handle the infamous raw deflate response from old servers
-				// a hack for old IIS and Apache servers
-				const raw = (0,external_node_stream_.pipeline)(response_, new external_node_stream_.PassThrough(), error => {
-					if (error) {
-						reject(error);
-					}
-				});
-				raw.once('data', chunk => {
-					// See http://stackoverflow.com/questions/37519828
-					if ((chunk[0] & 0x0F) === 0x08) {
-						body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createInflate(), error => {
-							if (error) {
-								reject(error);
-							}
-						});
-					} else {
-						body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createInflateRaw(), error => {
-							if (error) {
-								reject(error);
-							}
-						});
-					}
-
-					response = new Response(body, responseOptions);
-					resolve(response);
-				});
-				raw.once('end', () => {
-					// Some old IIS servers return zero-length OK deflate responses, so
-					// 'data' is never emitted. See https://github.com/node-fetch/node-fetch/pull/903
-					if (!response) {
-						response = new Response(body, responseOptions);
-						resolve(response);
-					}
-				});
-				return;
-			}
-
-			// For br
-			if (codings === 'br') {
-				body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createBrotliDecompress(), error => {
-					if (error) {
-						reject(error);
-					}
-				});
-				response = new Response(body, responseOptions);
-				resolve(response);
-				return;
-			}
-
-			// Otherwise, use response as-is
-			response = new Response(body, responseOptions);
-			resolve(response);
-		});
-
-		// eslint-disable-next-line promise/prefer-await-to-then
-		writeToStream(request_, request).catch(reject);
-	});
-}
-
-function fixResponseChunkedTransferBadEnding(request, errorCallback) {
-	const LAST_CHUNK = external_node_buffer_namespaceObject.Buffer.from('0\r\n\r\n');
-
-	let isChunkedTransfer = false;
-	let properLastChunkReceived = false;
-	let previousChunk;
-
-	request.on('response', response => {
-		const {headers} = response;
-		isChunkedTransfer = headers['transfer-encoding'] === 'chunked' && !headers['content-length'];
-	});
-
-	request.on('socket', socket => {
-		const onSocketClose = () => {
-			if (isChunkedTransfer && !properLastChunkReceived) {
-				const error = new Error('Premature close');
-				error.code = 'ERR_STREAM_PREMATURE_CLOSE';
-				errorCallback(error);
-			}
-		};
-
-		const onData = buf => {
-			properLastChunkReceived = external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-5), LAST_CHUNK) === 0;
-
-			// Sometimes final 0-length chunk and end of message code are in separate packets
-			if (!properLastChunkReceived && previousChunk) {
-				properLastChunkReceived = (
-					external_node_buffer_namespaceObject.Buffer.compare(previousChunk.slice(-3), LAST_CHUNK.slice(0, 3)) === 0 &&
-					external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-2), LAST_CHUNK.slice(3)) === 0
-				);
-			}
-
-			previousChunk = buf;
-		};
-
-		socket.prependListener('close', onSocketClose);
-		socket.on('data', onData);
-
-		request.on('close', () => {
-			socket.removeListener('close', onSocketClose);
-			socket.removeListener('data', onData);
-		});
-	});
-}
-
-// EXTERNAL MODULE: ./src/types.ts
-var types = __nccwpck_require__(4656);
-;// CONCATENATED MODULE: ./src/hangar-client.ts
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   D: () => (/* binding */ HangarClient)
+/* harmony export */ });
+/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(2491);
+/* harmony import */ var _types_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(4656);
 
 
 class HangarClient {
@@ -42332,7 +42834,7 @@ class HangarClient {
         const url = `${this.baseUrl}/authenticate?apiKey=${encodeURIComponent(apiToken)}`;
         this.logger.debug("Authenticating with Hangar API");
         try {
-            const response = await fetch(url, {
+            const response = await (0,node_fetch__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .Ay)(url, {
                 method: "POST",
                 headers: {
                     "User-Agent": `hangar-upload-action; ${slug};`,
@@ -42340,30 +42842,30 @@ class HangarClient {
             });
             const responseText = await response.text();
             if (!response.ok) {
-                throw new types/* HangarError */.q(`Authentication failed: ${response.statusText}`, response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q(`Authentication failed: ${response.statusText}`, response.status, responseText);
             }
             let authResponse;
             try {
                 authResponse = JSON.parse(responseText);
             }
             catch (parseError) {
-                throw new types/* HangarError */.q("Invalid authentication response format", response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q("Invalid authentication response format", response.status, responseText);
             }
             if (!authResponse.token) {
-                throw new types/* HangarError */.q("Authentication response missing token", response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q("Authentication response missing token", response.status, responseText);
             }
             this.logger.info("Successfully authenticated with Hangar API");
             this.logger.debug(`Token expires in: ${authResponse.expiresIn} seconds`);
             return authResponse.token;
         }
         catch (error) {
-            if (error instanceof types/* HangarError */.q) {
+            if (error instanceof _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q) {
                 this.logger.error("Authentication failed", error);
                 throw error;
             }
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error("Network error during authentication", error);
-            throw new types/* HangarError */.q(`Authentication network error: ${message}`);
+            throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q(`Authentication network error: ${message}`);
         }
     }
     async uploadVersion(slug, token, form, versionUpload) {
@@ -42377,7 +42879,7 @@ class HangarClient {
             contentType: "application/json",
         });
         try {
-            const response = await fetch(url, {
+            const response = await (0,node_fetch__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .Ay)(url, {
                 method: "POST",
                 headers: {
                     "User-Agent": `hangar-upload-action; ${slug};`,
@@ -42388,30 +42890,30 @@ class HangarClient {
             });
             const responseText = await response.text();
             if (!response.ok) {
-                throw new types/* HangarError */.q(`Upload failed: ${response.statusText}`, response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q(`Upload failed: ${response.statusText}`, response.status, responseText);
             }
             let uploadResponse;
             try {
                 uploadResponse = JSON.parse(responseText);
             }
             catch (parseError) {
-                throw new types/* HangarError */.q("Invalid upload response format", response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q("Invalid upload response format", response.status, responseText);
             }
             if (!uploadResponse.url) {
-                throw new types/* HangarError */.q("Upload response missing URL", response.status, responseText);
+                throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q("Upload response missing URL", response.status, responseText);
             }
             this.logger.info("Successfully uploaded version to Hangar");
             this.logger.debug("Upload response", uploadResponse);
             return uploadResponse;
         }
         catch (error) {
-            if (error instanceof types/* HangarError */.q) {
+            if (error instanceof _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q) {
                 this.logger.error("Upload failed", error);
                 throw error;
             }
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error("Network error during upload", error);
-            throw new types/* HangarError */.q(`Upload network error: ${message}`);
+            throw new _types_js__WEBPACK_IMPORTED_MODULE_0__/* .HangarError */ .q(`Upload network error: ${message}`);
         }
     }
 }
@@ -42428,8 +42930,10 @@ __nccwpck_require__.a(module, async (__webpack_handle_async_dependencies__, __we
 /* harmony import */ var _logger_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(1661);
 /* harmony import */ var _input_parser_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(5453);
 /* harmony import */ var _file_processor_js__WEBPACK_IMPORTED_MODULE_3__ = __nccwpck_require__(8577);
-/* harmony import */ var _hangar_client_js__WEBPACK_IMPORTED_MODULE_4__ = __nccwpck_require__(4359);
-/* harmony import */ var _types_js__WEBPACK_IMPORTED_MODULE_5__ = __nccwpck_require__(4656);
+/* harmony import */ var _hangar_client_js__WEBPACK_IMPORTED_MODULE_4__ = __nccwpck_require__(4960);
+/* harmony import */ var _version_resolver_js__WEBPACK_IMPORTED_MODULE_5__ = __nccwpck_require__(7260);
+/* harmony import */ var _types_js__WEBPACK_IMPORTED_MODULE_6__ = __nccwpck_require__(4656);
+
 
 
 
@@ -42445,13 +42949,15 @@ async function main() {
         logger.info(`Uploading version ${inputs.version} to project ${inputs.slug} on channel ${inputs.channel}`);
         const fileProcessor = new _file_processor_js__WEBPACK_IMPORTED_MODULE_3__/* .FileProcessor */ .t(logger);
         const { form, filesData } = await fileProcessor.processFiles(inputs.files);
+        const versionResolver = new _version_resolver_js__WEBPACK_IMPORTED_MODULE_5__/* .VersionResolver */ .b(logger);
+        const resolvedPlatformDependencies = await versionResolver.resolvePlatformDependencies(inputs.platformDependencies);
         const versionUpload = {
             version: inputs.version,
             channel: inputs.channel,
             description: inputs.description,
             files: filesData,
             pluginDependencies: inputs.pluginDependencies,
-            platformDependencies: inputs.platformDependencies,
+            platformDependencies: resolvedPlatformDependencies,
         };
         logger.debug("Version upload payload", versionUpload);
         const hangarClient = new _hangar_client_js__WEBPACK_IMPORTED_MODULE_4__/* .HangarClient */ .D(logger);
@@ -42461,7 +42967,7 @@ async function main() {
         logger.info(`Upload completed successfully! URL: ${uploadResult.url}`);
     }
     catch (error) {
-        if (error instanceof _types_js__WEBPACK_IMPORTED_MODULE_5__/* .HangarError */ .q) {
+        if (error instanceof _types_js__WEBPACK_IMPORTED_MODULE_6__/* .HangarError */ .q) {
             logger.error(`Hangar API error (${error.statusCode}): ${error.message}`);
             if (error.responseBody) {
                 logger.debug("API response body", error.responseBody);
@@ -42519,7 +43025,7 @@ class InputParser {
             const platformDependenciesInput = this.getOptionalInput("platform_dependencies");
             const files = this.parseFiles(filesInput);
             const pluginDependencies = this.parseJsonInput(pluginDependenciesInput, "plugin_dependencies", {});
-            const platformDependencies = this.parseJsonInput(platformDependenciesInput, "platform_dependencies", {});
+            const platformDependencies = this.parsePlatformDependenciesInput(platformDependenciesInput);
             this.logger.debug("Successfully parsed all inputs");
             return {
                 apiToken,
@@ -42603,6 +43109,31 @@ class InputParser {
         }
         catch (error) {
             throw new Error(`Failed to parse ${name} as JSON: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    parsePlatformDependenciesInput(input) {
+        if (!input) {
+            return {};
+        }
+        try {
+            const parsed = JSON.parse(input);
+            const result = {};
+            for (const [platform, versions] of Object.entries(parsed)) {
+                if (!Array.isArray(versions)) {
+                    throw new Error(`Platform ${platform} must have an array of versions`);
+                }
+                const stringVersions = versions.map((v, i) => {
+                    if (typeof v !== "string") {
+                        throw new Error(`Version at index ${i} for platform ${platform} must be a string`);
+                    }
+                    return v;
+                });
+                result[platform] = stringVersions;
+            }
+            return result;
+        }
+        catch (error) {
+            throw new Error(`Failed to parse platform_dependencies: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 }
@@ -42691,6 +43222,203 @@ class HangarError extends Error {
         this.statusCode = statusCode;
         this.responseBody = responseBody;
         this.name = "HangarError";
+    }
+}
+
+
+/***/ }),
+
+/***/ 7260:
+/***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require__) => {
+
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   b: () => (/* binding */ VersionResolver)
+/* harmony export */ });
+/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(2491);
+/* harmony import */ var semver__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(2348);
+/* harmony import */ var semver__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__nccwpck_require__.n(semver__WEBPACK_IMPORTED_MODULE_0__);
+
+
+class VersionResolver {
+    logger;
+    cachedVersions = null;
+    cachedPaperMCVersions = new Map();
+    constructor(logger) {
+        this.logger = logger;
+    }
+    async resolvePlatformDependencies(platformDependencies) {
+        const resolved = {};
+        for (const [platform, versionPatterns] of Object.entries(platformDependencies)) {
+            this.logger.debug(`Resolving platform dependencies for ${platform}`, versionPatterns);
+            switch (platform) {
+                case "PAPER":
+                    resolved[platform] =
+                        await this.resolveMinecraftVersions(versionPatterns);
+                    break;
+                case "VELOCITY":
+                case "WATERFALL":
+                    resolved[platform] = await this.resolvePaperMCVersions(platform.toLowerCase(), versionPatterns);
+                    break;
+                default:
+                    resolved[platform] = this.resolveGenericVersions(versionPatterns); // For unknown platforms, try to resolve with semver if possible
+                    break;
+            }
+        }
+        return resolved;
+    }
+    async resolveMinecraftVersions(patterns) {
+        const allVersions = await this.getMinecraftVersions();
+        return this.resolveVersionsWithSemver(patterns, allVersions);
+    }
+    async resolvePaperMCVersions(project, patterns) {
+        const allVersions = await this.getPaperMCVersions(project);
+        return this.resolveVersionsWithSemver(patterns, allVersions);
+    }
+    resolveGenericVersions(patterns) {
+        // For platforms where we don't have an API to fetch versions from,
+        // we can only validate the input patterns and return them if they're valid semver
+        const resolvedVersions = new Set();
+        for (const pattern of patterns) {
+            // Check if it's a valid semver version (exact version)
+            if (semver__WEBPACK_IMPORTED_MODULE_0__.valid(pattern)) {
+                resolvedVersions.add(pattern);
+            }
+            else if (semver__WEBPACK_IMPORTED_MODULE_0__.validRange(pattern)) {
+                // It's a valid range but we can't resolve it without knowing available versions
+                this.logger.warning(`Cannot resolve semver range '${pattern}' without available versions list. Using as-is.`);
+                resolvedVersions.add(pattern);
+            }
+            else {
+                // Not valid semver, but might be platform-specific version format
+                this.logger.warning(`Invalid semver pattern '${pattern}', using as-is`);
+                resolvedVersions.add(pattern);
+            }
+        }
+        return Array.from(resolvedVersions);
+    }
+    resolveVersionsWithSemver(patterns, availableVersions) {
+        const resolvedVersions = new Set();
+        for (const pattern of patterns) {
+            const matchingVersions = this.getMatchingVersions(pattern, availableVersions);
+            matchingVersions.forEach((v) => resolvedVersions.add(v));
+        }
+        // Convert to array and sort by semver (newest first)
+        const result = Array.from(resolvedVersions).sort((a, b) => {
+            try {
+                return semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(a, b);
+            }
+            catch (error) {
+                // Fallback to string comparison if semver comparison fails
+                this.logger.debug(`Semver comparison failed for ${a} vs ${b}, using string comparison`);
+                return b.localeCompare(a);
+            }
+        });
+        this.logger.debug(`Resolved patterns [${patterns.join(", ")}] to ${result.length} versions:`, result);
+        return result;
+    }
+    getMatchingVersions(pattern, availableVersions) {
+        // First, try to normalize the pattern for semver
+        const normalizedPattern = this.normalizeVersionPattern(pattern);
+        try {
+            // Check if it's a valid semver range or version
+            if (semver__WEBPACK_IMPORTED_MODULE_0__.validRange(normalizedPattern)) {
+                const matches = availableVersions.filter((version) => {
+                    try {
+                        return semver__WEBPACK_IMPORTED_MODULE_0__.satisfies(version, normalizedPattern);
+                    }
+                    catch (error) {
+                        // If semver.satisfies fails, the version might not be valid semver
+                        this.logger.debug(`Semver.satisfies failed for version ${version} with pattern ${normalizedPattern}`);
+                        return false;
+                    }
+                });
+                if (matches.length > 0) {
+                    return matches;
+                }
+            }
+        }
+        catch (error) {
+            this.logger.debug(`Pattern '${normalizedPattern}' is not a valid semver range`);
+        }
+        // Fallback to exact string match
+        const exactMatches = availableVersions.filter((v) => v === pattern);
+        if (exactMatches.length > 0) {
+            return exactMatches;
+        }
+        this.logger.warning(`No matches found for version pattern: ${pattern}`);
+        return [];
+    }
+    normalizeVersionPattern(pattern) {
+        // Handle .x patterns by converting them to semver ranges
+        if (pattern.endsWith(".x")) {
+            const baseVersion = pattern.slice(0, -2);
+            // Convert "1.19.x" to "1.19.*" which is a valid semver range
+            return `${baseVersion}.*`;
+        }
+        // Handle other common patterns that might need normalization
+        if (pattern.includes("latest")) {
+            this.logger.warning(`'latest' pattern not supported in semver, treating as exact match`);
+            return pattern;
+        }
+        return pattern;
+    }
+    async getPaperMCVersions(project) {
+        const cacheKey = project.toLowerCase();
+        if (this.cachedPaperMCVersions.has(cacheKey)) {
+            return this.cachedPaperMCVersions.get(cacheKey);
+        }
+        try {
+            this.logger.debug(`Fetching ${project} versions from PaperMC API`);
+            const response = await (0,node_fetch__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .Ay)(`https://api.papermc.io/v2/projects/${project}`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch ${project} versions: ${response.statusText}`);
+            }
+            const projectData = (await response.json());
+            // Filter out pre-release versions and only include valid semver versions
+            const releaseVersions = projectData.versions
+                .filter((v) => !v.includes("pre") && !v.includes("snapshot"))
+                .filter((v) => {
+                const isValid = semver__WEBPACK_IMPORTED_MODULE_0__.valid(v);
+                if (!isValid) {
+                    this.logger.debug(`Filtering out invalid semver version: ${v}`);
+                }
+                return isValid;
+            })
+                .sort((a, b) => semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(a, b)); // Sort newest first
+            this.cachedPaperMCVersions.set(cacheKey, releaseVersions);
+            this.logger.debug(`Cached ${releaseVersions.length} ${project} versions`);
+            return releaseVersions;
+        }
+        catch (error) {
+            this.logger.error(`Failed to fetch ${project} versions`, error);
+            throw new Error(`Could not fetch ${project} versions: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    async getMinecraftVersions() {
+        if (this.cachedVersions) {
+            return this.cachedVersions;
+        }
+        try {
+            this.logger.debug("Fetching Minecraft version manifest from Mojang");
+            const response = await (0,node_fetch__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .Ay)("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
+            if (!response.ok) {
+                throw new Error(`Failed to fetch version manifest: ${response.statusText}`);
+            }
+            const manifest = (await response.json());
+            // Filter to only release versions (excluding snapshots) and sort by release time
+            const releaseVersions = manifest.versions
+                .filter((v) => v.type === "release") // This excludes snapshots as requested
+                .sort((a, b) => new Date(b.releaseTime).getTime() -
+                new Date(a.releaseTime).getTime())
+                .map((v) => v.id);
+            this.cachedVersions = releaseVersions;
+            this.logger.debug(`Cached ${releaseVersions.length} Minecraft versions (excluding snapshots)`);
+            return releaseVersions;
+        }
+        catch (error) {
+            this.logger.error("Failed to fetch Minecraft versions", error);
+            throw new Error(`Could not fetch Minecraft versions: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 }
 
@@ -45098,6 +45826,2165 @@ F.forEach((v,n)=>typeof v=='string'
 :c.push(p+e(n)+`"; filename="${e(v.name, 1)}"\r\nContent-Type: ${v.type||"application/octet-stream"}\r\n\r\n`, v, '\r\n'))
 c.push(`--${b}--`)
 return new B(c,{type:"multipart/form-data; boundary="+b})}
+
+
+/***/ }),
+
+/***/ 2491:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+
+// EXPORTS
+__nccwpck_require__.d(__webpack_exports__, {
+  Ay: () => (/* binding */ fetch)
+});
+
+// UNUSED EXPORTS: AbortError, Blob, FetchError, File, FormData, Headers, Request, Response, blobFrom, blobFromSync, fileFrom, fileFromSync, isRedirect
+
+;// CONCATENATED MODULE: external "node:http"
+const external_node_http_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http");
+;// CONCATENATED MODULE: external "node:https"
+const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
+;// CONCATENATED MODULE: external "node:zlib"
+const external_node_zlib_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:zlib");
+// EXTERNAL MODULE: external "node:stream"
+var external_node_stream_ = __nccwpck_require__(7075);
+;// CONCATENATED MODULE: external "node:buffer"
+const external_node_buffer_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:buffer");
+;// CONCATENATED MODULE: ./node_modules/.pnpm/data-uri-to-buffer@4.0.1/node_modules/data-uri-to-buffer/dist/index.js
+/**
+ * Returns a `Buffer` instance from the given data URI `uri`.
+ *
+ * @param {String} uri Data URI to turn into a Buffer instance
+ * @returns {Buffer} Buffer instance from Data URI
+ * @api public
+ */
+function dataUriToBuffer(uri) {
+    if (!/^data:/i.test(uri)) {
+        throw new TypeError('`uri` does not appear to be a Data URI (must begin with "data:")');
+    }
+    // strip newlines
+    uri = uri.replace(/\r?\n/g, '');
+    // split the URI up into the "metadata" and the "data" portions
+    const firstComma = uri.indexOf(',');
+    if (firstComma === -1 || firstComma <= 4) {
+        throw new TypeError('malformed data: URI');
+    }
+    // remove the "data:" scheme and parse the metadata
+    const meta = uri.substring(5, firstComma).split(';');
+    let charset = '';
+    let base64 = false;
+    const type = meta[0] || 'text/plain';
+    let typeFull = type;
+    for (let i = 1; i < meta.length; i++) {
+        if (meta[i] === 'base64') {
+            base64 = true;
+        }
+        else if (meta[i]) {
+            typeFull += `;${meta[i]}`;
+            if (meta[i].indexOf('charset=') === 0) {
+                charset = meta[i].substring(8);
+            }
+        }
+    }
+    // defaults to US-ASCII only if type is not provided
+    if (!meta[0] && !charset.length) {
+        typeFull += ';charset=US-ASCII';
+        charset = 'US-ASCII';
+    }
+    // get the encoded data portion and decode URI-encoded chars
+    const encoding = base64 ? 'base64' : 'ascii';
+    const data = unescape(uri.substring(firstComma + 1));
+    const buffer = Buffer.from(data, encoding);
+    // set `.type` and `.typeFull` properties to MIME type
+    buffer.type = type;
+    buffer.typeFull = typeFull;
+    // set the `.charset` property
+    buffer.charset = charset;
+    return buffer;
+}
+/* harmony default export */ const dist = (dataUriToBuffer);
+//# sourceMappingURL=index.js.map
+// EXTERNAL MODULE: external "node:util"
+var external_node_util_ = __nccwpck_require__(7975);
+// EXTERNAL MODULE: ./node_modules/.pnpm/fetch-blob@3.2.0/node_modules/fetch-blob/index.js
+var fetch_blob = __nccwpck_require__(3178);
+// EXTERNAL MODULE: ./node_modules/.pnpm/formdata-polyfill@4.0.10/node_modules/formdata-polyfill/esm.min.js
+var esm_min = __nccwpck_require__(8369);
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/base.js
+class FetchBaseError extends Error {
+	constructor(message, type) {
+		super(message);
+		// Hide custom error implementation details from end-users
+		Error.captureStackTrace(this, this.constructor);
+
+		this.type = type;
+	}
+
+	get name() {
+		return this.constructor.name;
+	}
+
+	get [Symbol.toStringTag]() {
+		return this.constructor.name;
+	}
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/fetch-error.js
+
+
+
+/**
+ * @typedef {{ address?: string, code: string, dest?: string, errno: number, info?: object, message: string, path?: string, port?: number, syscall: string}} SystemError
+*/
+
+/**
+ * FetchError interface for operational errors
+ */
+class FetchError extends FetchBaseError {
+	/**
+	 * @param  {string} message -      Error message for human
+	 * @param  {string} [type] -        Error type for machine
+	 * @param  {SystemError} [systemError] - For Node.js system error
+	 */
+	constructor(message, type, systemError) {
+		super(message, type);
+		// When err.type is `system`, err.erroredSysCall contains system error and err.code contains system error code
+		if (systemError) {
+			// eslint-disable-next-line no-multi-assign
+			this.code = this.errno = systemError.code;
+			this.erroredSysCall = systemError.syscall;
+		}
+	}
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/is.js
+/**
+ * Is.js
+ *
+ * Object type checks.
+ */
+
+const NAME = Symbol.toStringTag;
+
+/**
+ * Check if `obj` is a URLSearchParams object
+ * ref: https://github.com/node-fetch/node-fetch/issues/296#issuecomment-307598143
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isURLSearchParameters = object => {
+	return (
+		typeof object === 'object' &&
+		typeof object.append === 'function' &&
+		typeof object.delete === 'function' &&
+		typeof object.get === 'function' &&
+		typeof object.getAll === 'function' &&
+		typeof object.has === 'function' &&
+		typeof object.set === 'function' &&
+		typeof object.sort === 'function' &&
+		object[NAME] === 'URLSearchParams'
+	);
+};
+
+/**
+ * Check if `object` is a W3C `Blob` object (which `File` inherits from)
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isBlob = object => {
+	return (
+		object &&
+		typeof object === 'object' &&
+		typeof object.arrayBuffer === 'function' &&
+		typeof object.type === 'string' &&
+		typeof object.stream === 'function' &&
+		typeof object.constructor === 'function' &&
+		/^(Blob|File)$/.test(object[NAME])
+	);
+};
+
+/**
+ * Check if `obj` is an instance of AbortSignal.
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isAbortSignal = object => {
+	return (
+		typeof object === 'object' && (
+			object[NAME] === 'AbortSignal' ||
+			object[NAME] === 'EventTarget'
+		)
+	);
+};
+
+/**
+ * isDomainOrSubdomain reports whether sub is a subdomain (or exact match) of
+ * the parent domain.
+ *
+ * Both domains must already be in canonical form.
+ * @param {string|URL} original
+ * @param {string|URL} destination
+ */
+const isDomainOrSubdomain = (destination, original) => {
+	const orig = new URL(original).hostname;
+	const dest = new URL(destination).hostname;
+
+	return orig === dest || orig.endsWith(`.${dest}`);
+};
+
+/**
+ * isSameProtocol reports whether the two provided URLs use the same protocol.
+ *
+ * Both domains must already be in canonical form.
+ * @param {string|URL} original
+ * @param {string|URL} destination
+ */
+const isSameProtocol = (destination, original) => {
+	const orig = new URL(original).protocol;
+	const dest = new URL(destination).protocol;
+
+	return orig === dest;
+};
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/body.js
+
+/**
+ * Body.js
+ *
+ * Body interface provides common methods for Request and Response
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+const pipeline = (0,external_node_util_.promisify)(external_node_stream_.pipeline);
+const INTERNALS = Symbol('Body internals');
+
+/**
+ * Body mixin
+ *
+ * Ref: https://fetch.spec.whatwg.org/#body
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+class Body {
+	constructor(body, {
+		size = 0
+	} = {}) {
+		let boundary = null;
+
+		if (body === null) {
+			// Body is undefined or null
+			body = null;
+		} else if (isURLSearchParameters(body)) {
+			// Body is a URLSearchParams
+			body = external_node_buffer_namespaceObject.Buffer.from(body.toString());
+		} else if (isBlob(body)) {
+			// Body is blob
+		} else if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+			// Body is Buffer
+		} else if (external_node_util_.types.isAnyArrayBuffer(body)) {
+			// Body is ArrayBuffer
+			body = external_node_buffer_namespaceObject.Buffer.from(body);
+		} else if (ArrayBuffer.isView(body)) {
+			// Body is ArrayBufferView
+			body = external_node_buffer_namespaceObject.Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+		} else if (body instanceof external_node_stream_) {
+			// Body is stream
+		} else if (body instanceof esm_min/* FormData */.fS) {
+			// Body is FormData
+			body = (0,esm_min/* formDataToBlob */.$n)(body);
+			boundary = body.type.split('=')[1];
+		} else {
+			// None of the above
+			// coerce to string then buffer
+			body = external_node_buffer_namespaceObject.Buffer.from(String(body));
+		}
+
+		let stream = body;
+
+		if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+			stream = external_node_stream_.Readable.from(body);
+		} else if (isBlob(body)) {
+			stream = external_node_stream_.Readable.from(body.stream());
+		}
+
+		this[INTERNALS] = {
+			body,
+			stream,
+			boundary,
+			disturbed: false,
+			error: null
+		};
+		this.size = size;
+
+		if (body instanceof external_node_stream_) {
+			body.on('error', error_ => {
+				const error = error_ instanceof FetchBaseError ?
+					error_ :
+					new FetchError(`Invalid response body while trying to fetch ${this.url}: ${error_.message}`, 'system', error_);
+				this[INTERNALS].error = error;
+			});
+		}
+	}
+
+	get body() {
+		return this[INTERNALS].stream;
+	}
+
+	get bodyUsed() {
+		return this[INTERNALS].disturbed;
+	}
+
+	/**
+	 * Decode response as ArrayBuffer
+	 *
+	 * @return  Promise
+	 */
+	async arrayBuffer() {
+		const {buffer, byteOffset, byteLength} = await consumeBody(this);
+		return buffer.slice(byteOffset, byteOffset + byteLength);
+	}
+
+	async formData() {
+		const ct = this.headers.get('content-type');
+
+		if (ct.startsWith('application/x-www-form-urlencoded')) {
+			const formData = new esm_min/* FormData */.fS();
+			const parameters = new URLSearchParams(await this.text());
+
+			for (const [name, value] of parameters) {
+				formData.append(name, value);
+			}
+
+			return formData;
+		}
+
+		const {toFormData} = await __nccwpck_require__.e(/* import() */ 886).then(__nccwpck_require__.bind(__nccwpck_require__, 4886));
+		return toFormData(this.body, ct);
+	}
+
+	/**
+	 * Return raw response as Blob
+	 *
+	 * @return Promise
+	 */
+	async blob() {
+		const ct = (this.headers && this.headers.get('content-type')) || (this[INTERNALS].body && this[INTERNALS].body.type) || '';
+		const buf = await this.arrayBuffer();
+
+		return new fetch_blob/* default */.A([buf], {
+			type: ct
+		});
+	}
+
+	/**
+	 * Decode response as json
+	 *
+	 * @return  Promise
+	 */
+	async json() {
+		const text = await this.text();
+		return JSON.parse(text);
+	}
+
+	/**
+	 * Decode response as text
+	 *
+	 * @return  Promise
+	 */
+	async text() {
+		const buffer = await consumeBody(this);
+		return new TextDecoder().decode(buffer);
+	}
+
+	/**
+	 * Decode response as buffer (non-spec api)
+	 *
+	 * @return  Promise
+	 */
+	buffer() {
+		return consumeBody(this);
+	}
+}
+
+Body.prototype.buffer = (0,external_node_util_.deprecate)(Body.prototype.buffer, 'Please use \'response.arrayBuffer()\' instead of \'response.buffer()\'', 'node-fetch#buffer');
+
+// In browsers, all properties are enumerable.
+Object.defineProperties(Body.prototype, {
+	body: {enumerable: true},
+	bodyUsed: {enumerable: true},
+	arrayBuffer: {enumerable: true},
+	blob: {enumerable: true},
+	json: {enumerable: true},
+	text: {enumerable: true},
+	data: {get: (0,external_node_util_.deprecate)(() => {},
+		'data doesn\'t exist, use json(), text(), arrayBuffer(), or body instead',
+		'https://github.com/node-fetch/node-fetch/issues/1000 (response)')}
+});
+
+/**
+ * Consume and convert an entire Body to a Buffer.
+ *
+ * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
+ *
+ * @return Promise
+ */
+async function consumeBody(data) {
+	if (data[INTERNALS].disturbed) {
+		throw new TypeError(`body used already for: ${data.url}`);
+	}
+
+	data[INTERNALS].disturbed = true;
+
+	if (data[INTERNALS].error) {
+		throw data[INTERNALS].error;
+	}
+
+	const {body} = data;
+
+	// Body is null
+	if (body === null) {
+		return external_node_buffer_namespaceObject.Buffer.alloc(0);
+	}
+
+	/* c8 ignore next 3 */
+	if (!(body instanceof external_node_stream_)) {
+		return external_node_buffer_namespaceObject.Buffer.alloc(0);
+	}
+
+	// Body is stream
+	// get ready to actually consume the body
+	const accum = [];
+	let accumBytes = 0;
+
+	try {
+		for await (const chunk of body) {
+			if (data.size > 0 && accumBytes + chunk.length > data.size) {
+				const error = new FetchError(`content size at ${data.url} over limit: ${data.size}`, 'max-size');
+				body.destroy(error);
+				throw error;
+			}
+
+			accumBytes += chunk.length;
+			accum.push(chunk);
+		}
+	} catch (error) {
+		const error_ = error instanceof FetchBaseError ? error : new FetchError(`Invalid response body while trying to fetch ${data.url}: ${error.message}`, 'system', error);
+		throw error_;
+	}
+
+	if (body.readableEnded === true || body._readableState.ended === true) {
+		try {
+			if (accum.every(c => typeof c === 'string')) {
+				return external_node_buffer_namespaceObject.Buffer.from(accum.join(''));
+			}
+
+			return external_node_buffer_namespaceObject.Buffer.concat(accum, accumBytes);
+		} catch (error) {
+			throw new FetchError(`Could not create Buffer from response body for ${data.url}: ${error.message}`, 'system', error);
+		}
+	} else {
+		throw new FetchError(`Premature close of server response while trying to fetch ${data.url}`);
+	}
+}
+
+/**
+ * Clone body given Res/Req instance
+ *
+ * @param   Mixed   instance       Response or Request instance
+ * @param   String  highWaterMark  highWaterMark for both PassThrough body streams
+ * @return  Mixed
+ */
+const clone = (instance, highWaterMark) => {
+	let p1;
+	let p2;
+	let {body} = instance[INTERNALS];
+
+	// Don't allow cloning a used body
+	if (instance.bodyUsed) {
+		throw new Error('cannot clone body after it is used');
+	}
+
+	// Check that body is a stream and not form-data object
+	// note: we can't clone the form-data object without having it as a dependency
+	if ((body instanceof external_node_stream_) && (typeof body.getBoundary !== 'function')) {
+		// Tee instance body
+		p1 = new external_node_stream_.PassThrough({highWaterMark});
+		p2 = new external_node_stream_.PassThrough({highWaterMark});
+		body.pipe(p1);
+		body.pipe(p2);
+		// Set instance body to teed body and return the other teed body
+		instance[INTERNALS].stream = p1;
+		body = p2;
+	}
+
+	return body;
+};
+
+const getNonSpecFormDataBoundary = (0,external_node_util_.deprecate)(
+	body => body.getBoundary(),
+	'form-data doesn\'t follow the spec and requires special treatment. Use alternative package',
+	'https://github.com/node-fetch/node-fetch/issues/1167'
+);
+
+/**
+ * Performs the operation "extract a `Content-Type` value from |object|" as
+ * specified in the specification:
+ * https://fetch.spec.whatwg.org/#concept-bodyinit-extract
+ *
+ * This function assumes that instance.body is present.
+ *
+ * @param {any} body Any options.body input
+ * @returns {string | null}
+ */
+const extractContentType = (body, request) => {
+	// Body is null or undefined
+	if (body === null) {
+		return null;
+	}
+
+	// Body is string
+	if (typeof body === 'string') {
+		return 'text/plain;charset=UTF-8';
+	}
+
+	// Body is a URLSearchParams
+	if (isURLSearchParameters(body)) {
+		return 'application/x-www-form-urlencoded;charset=UTF-8';
+	}
+
+	// Body is blob
+	if (isBlob(body)) {
+		return body.type || null;
+	}
+
+	// Body is a Buffer (Buffer, ArrayBuffer or ArrayBufferView)
+	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body) || external_node_util_.types.isAnyArrayBuffer(body) || ArrayBuffer.isView(body)) {
+		return null;
+	}
+
+	if (body instanceof esm_min/* FormData */.fS) {
+		return `multipart/form-data; boundary=${request[INTERNALS].boundary}`;
+	}
+
+	// Detect form data input from form-data module
+	if (body && typeof body.getBoundary === 'function') {
+		return `multipart/form-data;boundary=${getNonSpecFormDataBoundary(body)}`;
+	}
+
+	// Body is stream - can't really do much about this
+	if (body instanceof external_node_stream_) {
+		return null;
+	}
+
+	// Body constructor defaults other things to string
+	return 'text/plain;charset=UTF-8';
+};
+
+/**
+ * The Fetch Standard treats this as if "total bytes" is a property on the body.
+ * For us, we have to explicitly get it with a function.
+ *
+ * ref: https://fetch.spec.whatwg.org/#concept-body-total-bytes
+ *
+ * @param {any} obj.body Body object from the Body instance.
+ * @returns {number | null}
+ */
+const getTotalBytes = request => {
+	const {body} = request[INTERNALS];
+
+	// Body is null or undefined
+	if (body === null) {
+		return 0;
+	}
+
+	// Body is Blob
+	if (isBlob(body)) {
+		return body.size;
+	}
+
+	// Body is Buffer
+	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+		return body.length;
+	}
+
+	// Detect form data input from form-data module
+	if (body && typeof body.getLengthSync === 'function') {
+		return body.hasKnownLength && body.hasKnownLength() ? body.getLengthSync() : null;
+	}
+
+	// Body is stream
+	return null;
+};
+
+/**
+ * Write a Body to a Node.js WritableStream (e.g. http.Request) object.
+ *
+ * @param {Stream.Writable} dest The stream to write to.
+ * @param obj.body Body object from the Body instance.
+ * @returns {Promise<void>}
+ */
+const writeToStream = async (dest, {body}) => {
+	if (body === null) {
+		// Body is null
+		dest.end();
+	} else {
+		// Body is stream
+		await pipeline(body, dest);
+	}
+};
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/headers.js
+/**
+ * Headers.js
+ *
+ * Headers class offers convenient helpers
+ */
+
+
+
+
+/* c8 ignore next 9 */
+const validateHeaderName = typeof external_node_http_namespaceObject.validateHeaderName === 'function' ?
+	external_node_http_namespaceObject.validateHeaderName :
+	name => {
+		if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(name)) {
+			const error = new TypeError(`Header name must be a valid HTTP token [${name}]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_HTTP_TOKEN'});
+			throw error;
+		}
+	};
+
+/* c8 ignore next 9 */
+const validateHeaderValue = typeof external_node_http_namespaceObject.validateHeaderValue === 'function' ?
+	external_node_http_namespaceObject.validateHeaderValue :
+	(name, value) => {
+		if (/[^\t\u0020-\u007E\u0080-\u00FF]/.test(value)) {
+			const error = new TypeError(`Invalid character in header content ["${name}"]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_CHAR'});
+			throw error;
+		}
+	};
+
+/**
+ * @typedef {Headers | Record<string, string> | Iterable<readonly [string, string]> | Iterable<Iterable<string>>} HeadersInit
+ */
+
+/**
+ * This Fetch API interface allows you to perform various actions on HTTP request and response headers.
+ * These actions include retrieving, setting, adding to, and removing.
+ * A Headers object has an associated header list, which is initially empty and consists of zero or more name and value pairs.
+ * You can add to this using methods like append() (see Examples.)
+ * In all methods of this interface, header names are matched by case-insensitive byte sequence.
+ *
+ */
+class Headers extends URLSearchParams {
+	/**
+	 * Headers class
+	 *
+	 * @constructor
+	 * @param {HeadersInit} [init] - Response headers
+	 */
+	constructor(init) {
+		// Validate and normalize init object in [name, value(s)][]
+		/** @type {string[][]} */
+		let result = [];
+		if (init instanceof Headers) {
+			const raw = init.raw();
+			for (const [name, values] of Object.entries(raw)) {
+				result.push(...values.map(value => [name, value]));
+			}
+		} else if (init == null) { // eslint-disable-line no-eq-null, eqeqeq
+			// No op
+		} else if (typeof init === 'object' && !external_node_util_.types.isBoxedPrimitive(init)) {
+			const method = init[Symbol.iterator];
+			// eslint-disable-next-line no-eq-null, eqeqeq
+			if (method == null) {
+				// Record<ByteString, ByteString>
+				result.push(...Object.entries(init));
+			} else {
+				if (typeof method !== 'function') {
+					throw new TypeError('Header pairs must be iterable');
+				}
+
+				// Sequence<sequence<ByteString>>
+				// Note: per spec we have to first exhaust the lists then process them
+				result = [...init]
+					.map(pair => {
+						if (
+							typeof pair !== 'object' || external_node_util_.types.isBoxedPrimitive(pair)
+						) {
+							throw new TypeError('Each header pair must be an iterable object');
+						}
+
+						return [...pair];
+					}).map(pair => {
+						if (pair.length !== 2) {
+							throw new TypeError('Each header pair must be a name/value tuple');
+						}
+
+						return [...pair];
+					});
+			}
+		} else {
+			throw new TypeError('Failed to construct \'Headers\': The provided value is not of type \'(sequence<sequence<ByteString>> or record<ByteString, ByteString>)');
+		}
+
+		// Validate and lowercase
+		result =
+			result.length > 0 ?
+				result.map(([name, value]) => {
+					validateHeaderName(name);
+					validateHeaderValue(name, String(value));
+					return [String(name).toLowerCase(), String(value)];
+				}) :
+				undefined;
+
+		super(result);
+
+		// Returning a Proxy that will lowercase key names, validate parameters and sort keys
+		// eslint-disable-next-line no-constructor-return
+		return new Proxy(this, {
+			get(target, p, receiver) {
+				switch (p) {
+					case 'append':
+					case 'set':
+						return (name, value) => {
+							validateHeaderName(name);
+							validateHeaderValue(name, String(value));
+							return URLSearchParams.prototype[p].call(
+								target,
+								String(name).toLowerCase(),
+								String(value)
+							);
+						};
+
+					case 'delete':
+					case 'has':
+					case 'getAll':
+						return name => {
+							validateHeaderName(name);
+							return URLSearchParams.prototype[p].call(
+								target,
+								String(name).toLowerCase()
+							);
+						};
+
+					case 'keys':
+						return () => {
+							target.sort();
+							return new Set(URLSearchParams.prototype.keys.call(target)).keys();
+						};
+
+					default:
+						return Reflect.get(target, p, receiver);
+				}
+			}
+		});
+		/* c8 ignore next */
+	}
+
+	get [Symbol.toStringTag]() {
+		return this.constructor.name;
+	}
+
+	toString() {
+		return Object.prototype.toString.call(this);
+	}
+
+	get(name) {
+		const values = this.getAll(name);
+		if (values.length === 0) {
+			return null;
+		}
+
+		let value = values.join(', ');
+		if (/^content-encoding$/i.test(name)) {
+			value = value.toLowerCase();
+		}
+
+		return value;
+	}
+
+	forEach(callback, thisArg = undefined) {
+		for (const name of this.keys()) {
+			Reflect.apply(callback, thisArg, [this.get(name), name, this]);
+		}
+	}
+
+	* values() {
+		for (const name of this.keys()) {
+			yield this.get(name);
+		}
+	}
+
+	/**
+	 * @type {() => IterableIterator<[string, string]>}
+	 */
+	* entries() {
+		for (const name of this.keys()) {
+			yield [name, this.get(name)];
+		}
+	}
+
+	[Symbol.iterator]() {
+		return this.entries();
+	}
+
+	/**
+	 * Node-fetch non-spec method
+	 * returning all headers and their values as array
+	 * @returns {Record<string, string[]>}
+	 */
+	raw() {
+		return [...this.keys()].reduce((result, key) => {
+			result[key] = this.getAll(key);
+			return result;
+		}, {});
+	}
+
+	/**
+	 * For better console.log(headers) and also to convert Headers into Node.js Request compatible format
+	 */
+	[Symbol.for('nodejs.util.inspect.custom')]() {
+		return [...this.keys()].reduce((result, key) => {
+			const values = this.getAll(key);
+			// Http.request() only supports string as Host header.
+			// This hack makes specifying custom Host header possible.
+			if (key === 'host') {
+				result[key] = values[0];
+			} else {
+				result[key] = values.length > 1 ? values : values[0];
+			}
+
+			return result;
+		}, {});
+	}
+}
+
+/**
+ * Re-shaping object for Web IDL tests
+ * Only need to do it for overridden methods
+ */
+Object.defineProperties(
+	Headers.prototype,
+	['get', 'entries', 'forEach', 'values'].reduce((result, property) => {
+		result[property] = {enumerable: true};
+		return result;
+	}, {})
+);
+
+/**
+ * Create a Headers object from an http.IncomingMessage.rawHeaders, ignoring those that do
+ * not conform to HTTP grammar productions.
+ * @param {import('http').IncomingMessage['rawHeaders']} headers
+ */
+function fromRawHeaders(headers = []) {
+	return new Headers(
+		headers
+			// Split into pairs
+			.reduce((result, value, index, array) => {
+				if (index % 2 === 0) {
+					result.push(array.slice(index, index + 2));
+				}
+
+				return result;
+			}, [])
+			.filter(([name, value]) => {
+				try {
+					validateHeaderName(name);
+					validateHeaderValue(name, String(value));
+					return true;
+				} catch {
+					return false;
+				}
+			})
+
+	);
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/is-redirect.js
+const redirectStatus = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Redirect code matching
+ *
+ * @param {number} code - Status code
+ * @return {boolean}
+ */
+const isRedirect = code => {
+	return redirectStatus.has(code);
+};
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/response.js
+/**
+ * Response.js
+ *
+ * Response class provides content decoding
+ */
+
+
+
+
+
+const response_INTERNALS = Symbol('Response internals');
+
+/**
+ * Response class
+ *
+ * Ref: https://fetch.spec.whatwg.org/#response-class
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+class Response extends Body {
+	constructor(body = null, options = {}) {
+		super(body, options);
+
+		// eslint-disable-next-line no-eq-null, eqeqeq, no-negated-condition
+		const status = options.status != null ? options.status : 200;
+
+		const headers = new Headers(options.headers);
+
+		if (body !== null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(body, this);
+			if (contentType) {
+				headers.append('Content-Type', contentType);
+			}
+		}
+
+		this[response_INTERNALS] = {
+			type: 'default',
+			url: options.url,
+			status,
+			statusText: options.statusText || '',
+			headers,
+			counter: options.counter,
+			highWaterMark: options.highWaterMark
+		};
+	}
+
+	get type() {
+		return this[response_INTERNALS].type;
+	}
+
+	get url() {
+		return this[response_INTERNALS].url || '';
+	}
+
+	get status() {
+		return this[response_INTERNALS].status;
+	}
+
+	/**
+	 * Convenience property representing if the request ended normally
+	 */
+	get ok() {
+		return this[response_INTERNALS].status >= 200 && this[response_INTERNALS].status < 300;
+	}
+
+	get redirected() {
+		return this[response_INTERNALS].counter > 0;
+	}
+
+	get statusText() {
+		return this[response_INTERNALS].statusText;
+	}
+
+	get headers() {
+		return this[response_INTERNALS].headers;
+	}
+
+	get highWaterMark() {
+		return this[response_INTERNALS].highWaterMark;
+	}
+
+	/**
+	 * Clone this response
+	 *
+	 * @return  Response
+	 */
+	clone() {
+		return new Response(clone(this, this.highWaterMark), {
+			type: this.type,
+			url: this.url,
+			status: this.status,
+			statusText: this.statusText,
+			headers: this.headers,
+			ok: this.ok,
+			redirected: this.redirected,
+			size: this.size,
+			highWaterMark: this.highWaterMark
+		});
+	}
+
+	/**
+	 * @param {string} url    The URL that the new response is to originate from.
+	 * @param {number} status An optional status code for the response (e.g., 302.)
+	 * @returns {Response}    A Response object.
+	 */
+	static redirect(url, status = 302) {
+		if (!isRedirect(status)) {
+			throw new RangeError('Failed to execute "redirect" on "response": Invalid status code');
+		}
+
+		return new Response(null, {
+			headers: {
+				location: new URL(url).toString()
+			},
+			status
+		});
+	}
+
+	static error() {
+		const response = new Response(null, {status: 0, statusText: ''});
+		response[response_INTERNALS].type = 'error';
+		return response;
+	}
+
+	static json(data = undefined, init = {}) {
+		const body = JSON.stringify(data);
+
+		if (body === undefined) {
+			throw new TypeError('data is not JSON serializable');
+		}
+
+		const headers = new Headers(init && init.headers);
+
+		if (!headers.has('content-type')) {
+			headers.set('content-type', 'application/json');
+		}
+
+		return new Response(body, {
+			...init,
+			headers
+		});
+	}
+
+	get [Symbol.toStringTag]() {
+		return 'Response';
+	}
+}
+
+Object.defineProperties(Response.prototype, {
+	type: {enumerable: true},
+	url: {enumerable: true},
+	status: {enumerable: true},
+	ok: {enumerable: true},
+	redirected: {enumerable: true},
+	statusText: {enumerable: true},
+	headers: {enumerable: true},
+	clone: {enumerable: true}
+});
+
+;// CONCATENATED MODULE: external "node:url"
+const external_node_url_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/get-search.js
+const getSearch = parsedURL => {
+	if (parsedURL.search) {
+		return parsedURL.search;
+	}
+
+	const lastOffset = parsedURL.href.length - 1;
+	const hash = parsedURL.hash || (parsedURL.href[lastOffset] === '#' ? '#' : '');
+	return parsedURL.href[lastOffset - hash.length] === '?' ? '?' : '';
+};
+
+;// CONCATENATED MODULE: external "node:net"
+const external_node_net_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:net");
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/utils/referrer.js
+
+
+/**
+ * @external URL
+ * @see {@link https://developer.mozilla.org/en-US/docs/Web/API/URL|URL}
+ */
+
+/**
+ * @module utils/referrer
+ * @private
+ */
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#strip-url|Referrer Policy §8.4. Strip url for use as a referrer}
+ * @param {string} URL
+ * @param {boolean} [originOnly=false]
+ */
+function stripURLForUseAsAReferrer(url, originOnly = false) {
+	// 1. If url is null, return no referrer.
+	if (url == null) { // eslint-disable-line no-eq-null, eqeqeq
+		return 'no-referrer';
+	}
+
+	url = new URL(url);
+
+	// 2. If url's scheme is a local scheme, then return no referrer.
+	if (/^(about|blob|data):$/.test(url.protocol)) {
+		return 'no-referrer';
+	}
+
+	// 3. Set url's username to the empty string.
+	url.username = '';
+
+	// 4. Set url's password to null.
+	// Note: `null` appears to be a mistake as this actually results in the password being `"null"`.
+	url.password = '';
+
+	// 5. Set url's fragment to null.
+	// Note: `null` appears to be a mistake as this actually results in the fragment being `"#null"`.
+	url.hash = '';
+
+	// 6. If the origin-only flag is true, then:
+	if (originOnly) {
+		// 6.1. Set url's path to null.
+		// Note: `null` appears to be a mistake as this actually results in the path being `"/null"`.
+		url.pathname = '';
+
+		// 6.2. Set url's query to null.
+		// Note: `null` appears to be a mistake as this actually results in the query being `"?null"`.
+		url.search = '';
+	}
+
+	// 7. Return url.
+	return url;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#enumdef-referrerpolicy|enum ReferrerPolicy}
+ */
+const ReferrerPolicy = new Set([
+	'',
+	'no-referrer',
+	'no-referrer-when-downgrade',
+	'same-origin',
+	'origin',
+	'strict-origin',
+	'origin-when-cross-origin',
+	'strict-origin-when-cross-origin',
+	'unsafe-url'
+]);
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#default-referrer-policy|default referrer policy}
+ */
+const DEFAULT_REFERRER_POLICY = 'strict-origin-when-cross-origin';
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#referrer-policies|Referrer Policy §3. Referrer Policies}
+ * @param {string} referrerPolicy
+ * @returns {string} referrerPolicy
+ */
+function validateReferrerPolicy(referrerPolicy) {
+	if (!ReferrerPolicy.has(referrerPolicy)) {
+		throw new TypeError(`Invalid referrerPolicy: ${referrerPolicy}`);
+	}
+
+	return referrerPolicy;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy|Referrer Policy §3.2. Is origin potentially trustworthy?}
+ * @param {external:URL} url
+ * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
+ */
+function isOriginPotentiallyTrustworthy(url) {
+	// 1. If origin is an opaque origin, return "Not Trustworthy".
+	// Not applicable
+
+	// 2. Assert: origin is a tuple origin.
+	// Not for implementations
+
+	// 3. If origin's scheme is either "https" or "wss", return "Potentially Trustworthy".
+	if (/^(http|ws)s:$/.test(url.protocol)) {
+		return true;
+	}
+
+	// 4. If origin's host component matches one of the CIDR notations 127.0.0.0/8 or ::1/128 [RFC4632], return "Potentially Trustworthy".
+	const hostIp = url.host.replace(/(^\[)|(]$)/g, '');
+	const hostIPVersion = (0,external_node_net_namespaceObject.isIP)(hostIp);
+
+	if (hostIPVersion === 4 && /^127\./.test(hostIp)) {
+		return true;
+	}
+
+	if (hostIPVersion === 6 && /^(((0+:){7})|(::(0+:){0,6}))0*1$/.test(hostIp)) {
+		return true;
+	}
+
+	// 5. If origin's host component is "localhost" or falls within ".localhost", and the user agent conforms to the name resolution rules in [let-localhost-be-localhost], return "Potentially Trustworthy".
+	// We are returning FALSE here because we cannot ensure conformance to
+	// let-localhost-be-loalhost (https://tools.ietf.org/html/draft-west-let-localhost-be-localhost)
+	if (url.host === 'localhost' || url.host.endsWith('.localhost')) {
+		return false;
+	}
+
+	// 6. If origin's scheme component is file, return "Potentially Trustworthy".
+	if (url.protocol === 'file:') {
+		return true;
+	}
+
+	// 7. If origin's scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
+	// Not supported
+
+	// 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
+	// Not supported
+
+	// 9. Return "Not Trustworthy".
+	return false;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-url-trustworthy|Referrer Policy §3.3. Is url potentially trustworthy?}
+ * @param {external:URL} url
+ * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
+ */
+function isUrlPotentiallyTrustworthy(url) {
+	// 1. If url is "about:blank" or "about:srcdoc", return "Potentially Trustworthy".
+	if (/^about:(blank|srcdoc)$/.test(url)) {
+		return true;
+	}
+
+	// 2. If url's scheme is "data", return "Potentially Trustworthy".
+	if (url.protocol === 'data:') {
+		return true;
+	}
+
+	// Note: The origin of blob: and filesystem: URLs is the origin of the context in which they were
+	// created. Therefore, blobs created in a trustworthy origin will themselves be potentially
+	// trustworthy.
+	if (/^(blob|filesystem):$/.test(url.protocol)) {
+		return true;
+	}
+
+	// 3. Return the result of executing §3.2 Is origin potentially trustworthy? on url's origin.
+	return isOriginPotentiallyTrustworthy(url);
+}
+
+/**
+ * Modifies the referrerURL to enforce any extra security policy considerations.
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
+ * @callback module:utils/referrer~referrerURLCallback
+ * @param {external:URL} referrerURL
+ * @returns {external:URL} modified referrerURL
+ */
+
+/**
+ * Modifies the referrerOrigin to enforce any extra security policy considerations.
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
+ * @callback module:utils/referrer~referrerOriginCallback
+ * @param {external:URL} referrerOrigin
+ * @returns {external:URL} modified referrerOrigin
+ */
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}
+ * @param {Request} request
+ * @param {object} o
+ * @param {module:utils/referrer~referrerURLCallback} o.referrerURLCallback
+ * @param {module:utils/referrer~referrerOriginCallback} o.referrerOriginCallback
+ * @returns {external:URL} Request's referrer
+ */
+function determineRequestsReferrer(request, {referrerURLCallback, referrerOriginCallback} = {}) {
+	// There are 2 notes in the specification about invalid pre-conditions.  We return null, here, for
+	// these cases:
+	// > Note: If request's referrer is "no-referrer", Fetch will not call into this algorithm.
+	// > Note: If request's referrer policy is the empty string, Fetch will not call into this
+	// > algorithm.
+	if (request.referrer === 'no-referrer' || request.referrerPolicy === '') {
+		return null;
+	}
+
+	// 1. Let policy be request's associated referrer policy.
+	const policy = request.referrerPolicy;
+
+	// 2. Let environment be request's client.
+	// not applicable to node.js
+
+	// 3. Switch on request's referrer:
+	if (request.referrer === 'about:client') {
+		return 'no-referrer';
+	}
+
+	// "a URL": Let referrerSource be request's referrer.
+	const referrerSource = request.referrer;
+
+	// 4. Let request's referrerURL be the result of stripping referrerSource for use as a referrer.
+	let referrerURL = stripURLForUseAsAReferrer(referrerSource);
+
+	// 5. Let referrerOrigin be the result of stripping referrerSource for use as a referrer, with the
+	//    origin-only flag set to true.
+	let referrerOrigin = stripURLForUseAsAReferrer(referrerSource, true);
+
+	// 6. If the result of serializing referrerURL is a string whose length is greater than 4096, set
+	//    referrerURL to referrerOrigin.
+	if (referrerURL.toString().length > 4096) {
+		referrerURL = referrerOrigin;
+	}
+
+	// 7. The user agent MAY alter referrerURL or referrerOrigin at this point to enforce arbitrary
+	//    policy considerations in the interests of minimizing data leakage. For example, the user
+	//    agent could strip the URL down to an origin, modify its host, replace it with an empty
+	//    string, etc.
+	if (referrerURLCallback) {
+		referrerURL = referrerURLCallback(referrerURL);
+	}
+
+	if (referrerOriginCallback) {
+		referrerOrigin = referrerOriginCallback(referrerOrigin);
+	}
+
+	// 8.Execute the statements corresponding to the value of policy:
+	const currentURL = new URL(request.url);
+
+	switch (policy) {
+		case 'no-referrer':
+			return 'no-referrer';
+
+		case 'origin':
+			return referrerOrigin;
+
+		case 'unsafe-url':
+			return referrerURL;
+
+		case 'strict-origin':
+			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 2. Return referrerOrigin.
+			return referrerOrigin.toString();
+
+		case 'strict-origin-when-cross-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// 2. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 3. Return referrerOrigin.
+			return referrerOrigin;
+
+		case 'same-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// 2. Return no referrer.
+			return 'no-referrer';
+
+		case 'origin-when-cross-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// Return referrerOrigin.
+			return referrerOrigin;
+
+		case 'no-referrer-when-downgrade':
+			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 2. Return referrerURL.
+			return referrerURL;
+
+		default:
+			throw new TypeError(`Invalid referrerPolicy: ${policy}`);
+	}
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#parse-referrer-policy-from-header|Referrer Policy §8.1. Parse a referrer policy from a Referrer-Policy header}
+ * @param {Headers} headers Response headers
+ * @returns {string} policy
+ */
+function parseReferrerPolicyFromHeader(headers) {
+	// 1. Let policy-tokens be the result of extracting header list values given `Referrer-Policy`
+	//    and response’s header list.
+	const policyTokens = (headers.get('referrer-policy') || '').split(/[,\s]+/);
+
+	// 2. Let policy be the empty string.
+	let policy = '';
+
+	// 3. For each token in policy-tokens, if token is a referrer policy and token is not the empty
+	//    string, then set policy to token.
+	// Note: This algorithm loops over multiple policy values to allow deployment of new policy
+	// values with fallbacks for older user agents, as described in § 11.1 Unknown Policy Values.
+	for (const token of policyTokens) {
+		if (token && ReferrerPolicy.has(token)) {
+			policy = token;
+		}
+	}
+
+	// 4. Return policy.
+	return policy;
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/request.js
+/**
+ * Request.js
+ *
+ * Request class contains server only options
+ *
+ * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
+ */
+
+
+
+
+
+
+
+
+
+const request_INTERNALS = Symbol('Request internals');
+
+/**
+ * Check if `obj` is an instance of Request.
+ *
+ * @param  {*} object
+ * @return {boolean}
+ */
+const isRequest = object => {
+	return (
+		typeof object === 'object' &&
+		typeof object[request_INTERNALS] === 'object'
+	);
+};
+
+const doBadDataWarn = (0,external_node_util_.deprecate)(() => {},
+	'.data is not a valid RequestInit property, use .body instead',
+	'https://github.com/node-fetch/node-fetch/issues/1000 (request)');
+
+/**
+ * Request class
+ *
+ * Ref: https://fetch.spec.whatwg.org/#request-class
+ *
+ * @param   Mixed   input  Url or Request instance
+ * @param   Object  init   Custom options
+ * @return  Void
+ */
+class Request extends Body {
+	constructor(input, init = {}) {
+		let parsedURL;
+
+		// Normalize input and force URL to be encoded as UTF-8 (https://github.com/node-fetch/node-fetch/issues/245)
+		if (isRequest(input)) {
+			parsedURL = new URL(input.url);
+		} else {
+			parsedURL = new URL(input);
+			input = {};
+		}
+
+		if (parsedURL.username !== '' || parsedURL.password !== '') {
+			throw new TypeError(`${parsedURL} is an url with embedded credentials.`);
+		}
+
+		let method = init.method || input.method || 'GET';
+		if (/^(delete|get|head|options|post|put)$/i.test(method)) {
+			method = method.toUpperCase();
+		}
+
+		if (!isRequest(init) && 'data' in init) {
+			doBadDataWarn();
+		}
+
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		if ((init.body != null || (isRequest(input) && input.body !== null)) &&
+			(method === 'GET' || method === 'HEAD')) {
+			throw new TypeError('Request with GET/HEAD method cannot have body');
+		}
+
+		const inputBody = init.body ?
+			init.body :
+			(isRequest(input) && input.body !== null ?
+				clone(input) :
+				null);
+
+		super(inputBody, {
+			size: init.size || input.size || 0
+		});
+
+		const headers = new Headers(init.headers || input.headers || {});
+
+		if (inputBody !== null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(inputBody, this);
+			if (contentType) {
+				headers.set('Content-Type', contentType);
+			}
+		}
+
+		let signal = isRequest(input) ?
+			input.signal :
+			null;
+		if ('signal' in init) {
+			signal = init.signal;
+		}
+
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		if (signal != null && !isAbortSignal(signal)) {
+			throw new TypeError('Expected signal to be an instanceof AbortSignal or EventTarget');
+		}
+
+		// §5.4, Request constructor steps, step 15.1
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		let referrer = init.referrer == null ? input.referrer : init.referrer;
+		if (referrer === '') {
+			// §5.4, Request constructor steps, step 15.2
+			referrer = 'no-referrer';
+		} else if (referrer) {
+			// §5.4, Request constructor steps, step 15.3.1, 15.3.2
+			const parsedReferrer = new URL(referrer);
+			// §5.4, Request constructor steps, step 15.3.3, 15.3.4
+			referrer = /^about:(\/\/)?client$/.test(parsedReferrer) ? 'client' : parsedReferrer;
+		} else {
+			referrer = undefined;
+		}
+
+		this[request_INTERNALS] = {
+			method,
+			redirect: init.redirect || input.redirect || 'follow',
+			headers,
+			parsedURL,
+			signal,
+			referrer
+		};
+
+		// Node-fetch-only options
+		this.follow = init.follow === undefined ? (input.follow === undefined ? 20 : input.follow) : init.follow;
+		this.compress = init.compress === undefined ? (input.compress === undefined ? true : input.compress) : init.compress;
+		this.counter = init.counter || input.counter || 0;
+		this.agent = init.agent || input.agent;
+		this.highWaterMark = init.highWaterMark || input.highWaterMark || 16384;
+		this.insecureHTTPParser = init.insecureHTTPParser || input.insecureHTTPParser || false;
+
+		// §5.4, Request constructor steps, step 16.
+		// Default is empty string per https://fetch.spec.whatwg.org/#concept-request-referrer-policy
+		this.referrerPolicy = init.referrerPolicy || input.referrerPolicy || '';
+	}
+
+	/** @returns {string} */
+	get method() {
+		return this[request_INTERNALS].method;
+	}
+
+	/** @returns {string} */
+	get url() {
+		return (0,external_node_url_namespaceObject.format)(this[request_INTERNALS].parsedURL);
+	}
+
+	/** @returns {Headers} */
+	get headers() {
+		return this[request_INTERNALS].headers;
+	}
+
+	get redirect() {
+		return this[request_INTERNALS].redirect;
+	}
+
+	/** @returns {AbortSignal} */
+	get signal() {
+		return this[request_INTERNALS].signal;
+	}
+
+	// https://fetch.spec.whatwg.org/#dom-request-referrer
+	get referrer() {
+		if (this[request_INTERNALS].referrer === 'no-referrer') {
+			return '';
+		}
+
+		if (this[request_INTERNALS].referrer === 'client') {
+			return 'about:client';
+		}
+
+		if (this[request_INTERNALS].referrer) {
+			return this[request_INTERNALS].referrer.toString();
+		}
+
+		return undefined;
+	}
+
+	get referrerPolicy() {
+		return this[request_INTERNALS].referrerPolicy;
+	}
+
+	set referrerPolicy(referrerPolicy) {
+		this[request_INTERNALS].referrerPolicy = validateReferrerPolicy(referrerPolicy);
+	}
+
+	/**
+	 * Clone this request
+	 *
+	 * @return  Request
+	 */
+	clone() {
+		return new Request(this);
+	}
+
+	get [Symbol.toStringTag]() {
+		return 'Request';
+	}
+}
+
+Object.defineProperties(Request.prototype, {
+	method: {enumerable: true},
+	url: {enumerable: true},
+	headers: {enumerable: true},
+	redirect: {enumerable: true},
+	clone: {enumerable: true},
+	signal: {enumerable: true},
+	referrer: {enumerable: true},
+	referrerPolicy: {enumerable: true}
+});
+
+/**
+ * Convert a Request to Node.js http request options.
+ *
+ * @param {Request} request - A Request instance
+ * @return The options object to be passed to http.request
+ */
+const getNodeRequestOptions = request => {
+	const {parsedURL} = request[request_INTERNALS];
+	const headers = new Headers(request[request_INTERNALS].headers);
+
+	// Fetch step 1.3
+	if (!headers.has('Accept')) {
+		headers.set('Accept', '*/*');
+	}
+
+	// HTTP-network-or-cache fetch steps 2.4-2.7
+	let contentLengthValue = null;
+	if (request.body === null && /^(post|put)$/i.test(request.method)) {
+		contentLengthValue = '0';
+	}
+
+	if (request.body !== null) {
+		const totalBytes = getTotalBytes(request);
+		// Set Content-Length if totalBytes is a number (that is not NaN)
+		if (typeof totalBytes === 'number' && !Number.isNaN(totalBytes)) {
+			contentLengthValue = String(totalBytes);
+		}
+	}
+
+	if (contentLengthValue) {
+		headers.set('Content-Length', contentLengthValue);
+	}
+
+	// 4.1. Main fetch, step 2.6
+	// > If request's referrer policy is the empty string, then set request's referrer policy to the
+	// > default referrer policy.
+	if (request.referrerPolicy === '') {
+		request.referrerPolicy = DEFAULT_REFERRER_POLICY;
+	}
+
+	// 4.1. Main fetch, step 2.7
+	// > If request's referrer is not "no-referrer", set request's referrer to the result of invoking
+	// > determine request's referrer.
+	if (request.referrer && request.referrer !== 'no-referrer') {
+		request[request_INTERNALS].referrer = determineRequestsReferrer(request);
+	} else {
+		request[request_INTERNALS].referrer = 'no-referrer';
+	}
+
+	// 4.5. HTTP-network-or-cache fetch, step 6.9
+	// > If httpRequest's referrer is a URL, then append `Referer`/httpRequest's referrer, serialized
+	// >  and isomorphic encoded, to httpRequest's header list.
+	if (request[request_INTERNALS].referrer instanceof URL) {
+		headers.set('Referer', request.referrer);
+	}
+
+	// HTTP-network-or-cache fetch step 2.11
+	if (!headers.has('User-Agent')) {
+		headers.set('User-Agent', 'node-fetch');
+	}
+
+	// HTTP-network-or-cache fetch step 2.15
+	if (request.compress && !headers.has('Accept-Encoding')) {
+		headers.set('Accept-Encoding', 'gzip, deflate, br');
+	}
+
+	let {agent} = request;
+	if (typeof agent === 'function') {
+		agent = agent(parsedURL);
+	}
+
+	// HTTP-network fetch step 4.2
+	// chunked encoding is handled by Node.js
+
+	const search = getSearch(parsedURL);
+
+	// Pass the full URL directly to request(), but overwrite the following
+	// options:
+	const options = {
+		// Overwrite search to retain trailing ? (issue #776)
+		path: parsedURL.pathname + search,
+		// The following options are not expressed in the URL
+		method: request.method,
+		headers: headers[Symbol.for('nodejs.util.inspect.custom')](),
+		insecureHTTPParser: request.insecureHTTPParser,
+		agent
+	};
+
+	return {
+		/** @type {URL} */
+		parsedURL,
+		options
+	};
+};
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/errors/abort-error.js
+
+
+/**
+ * AbortError interface for cancelled requests
+ */
+class AbortError extends FetchBaseError {
+	constructor(message, type = 'aborted') {
+		super(message, type);
+	}
+}
+
+// EXTERNAL MODULE: ./node_modules/.pnpm/fetch-blob@3.2.0/node_modules/fetch-blob/from.js + 2 modules
+var from = __nccwpck_require__(6177);
+;// CONCATENATED MODULE: ./node_modules/.pnpm/node-fetch@3.3.2/node_modules/node-fetch/src/index.js
+/**
+ * Index.js
+ *
+ * a request API compatible with window.fetch
+ *
+ * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const supportedSchemas = new Set(['data:', 'http:', 'https:']);
+
+/**
+ * Fetch function
+ *
+ * @param   {string | URL | import('./request').default} url - Absolute url or Request instance
+ * @param   {*} [options_] - Fetch options
+ * @return  {Promise<import('./response').default>}
+ */
+async function fetch(url, options_) {
+	return new Promise((resolve, reject) => {
+		// Build request object
+		const request = new Request(url, options_);
+		const {parsedURL, options} = getNodeRequestOptions(request);
+		if (!supportedSchemas.has(parsedURL.protocol)) {
+			throw new TypeError(`node-fetch cannot load ${url}. URL scheme "${parsedURL.protocol.replace(/:$/, '')}" is not supported.`);
+		}
+
+		if (parsedURL.protocol === 'data:') {
+			const data = dist(request.url);
+			const response = new Response(data, {headers: {'Content-Type': data.typeFull}});
+			resolve(response);
+			return;
+		}
+
+		// Wrap http.request into fetch
+		const send = (parsedURL.protocol === 'https:' ? external_node_https_namespaceObject : external_node_http_namespaceObject).request;
+		const {signal} = request;
+		let response = null;
+
+		const abort = () => {
+			const error = new AbortError('The operation was aborted.');
+			reject(error);
+			if (request.body && request.body instanceof external_node_stream_.Readable) {
+				request.body.destroy(error);
+			}
+
+			if (!response || !response.body) {
+				return;
+			}
+
+			response.body.emit('error', error);
+		};
+
+		if (signal && signal.aborted) {
+			abort();
+			return;
+		}
+
+		const abortAndFinalize = () => {
+			abort();
+			finalize();
+		};
+
+		// Send request
+		const request_ = send(parsedURL.toString(), options);
+
+		if (signal) {
+			signal.addEventListener('abort', abortAndFinalize);
+		}
+
+		const finalize = () => {
+			request_.abort();
+			if (signal) {
+				signal.removeEventListener('abort', abortAndFinalize);
+			}
+		};
+
+		request_.on('error', error => {
+			reject(new FetchError(`request to ${request.url} failed, reason: ${error.message}`, 'system', error));
+			finalize();
+		});
+
+		fixResponseChunkedTransferBadEnding(request_, error => {
+			if (response && response.body) {
+				response.body.destroy(error);
+			}
+		});
+
+		/* c8 ignore next 18 */
+		if (process.version < 'v14') {
+			// Before Node.js 14, pipeline() does not fully support async iterators and does not always
+			// properly handle when the socket close/end events are out of order.
+			request_.on('socket', s => {
+				let endedWithEventsCount;
+				s.prependListener('end', () => {
+					endedWithEventsCount = s._eventsCount;
+				});
+				s.prependListener('close', hadError => {
+					// if end happened before close but the socket didn't emit an error, do it now
+					if (response && endedWithEventsCount < s._eventsCount && !hadError) {
+						const error = new Error('Premature close');
+						error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+						response.body.emit('error', error);
+					}
+				});
+			});
+		}
+
+		request_.on('response', response_ => {
+			request_.setTimeout(0);
+			const headers = fromRawHeaders(response_.rawHeaders);
+
+			// HTTP fetch step 5
+			if (isRedirect(response_.statusCode)) {
+				// HTTP fetch step 5.2
+				const location = headers.get('Location');
+
+				// HTTP fetch step 5.3
+				let locationURL = null;
+				try {
+					locationURL = location === null ? null : new URL(location, request.url);
+				} catch {
+					// error here can only be invalid URL in Location: header
+					// do not throw when options.redirect == manual
+					// let the user extract the errorneous redirect URL
+					if (request.redirect !== 'manual') {
+						reject(new FetchError(`uri requested responds with an invalid redirect URL: ${location}`, 'invalid-redirect'));
+						finalize();
+						return;
+					}
+				}
+
+				// HTTP fetch step 5.5
+				switch (request.redirect) {
+					case 'error':
+						reject(new FetchError(`uri requested responds with a redirect, redirect mode is set to error: ${request.url}`, 'no-redirect'));
+						finalize();
+						return;
+					case 'manual':
+						// Nothing to do
+						break;
+					case 'follow': {
+						// HTTP-redirect fetch step 2
+						if (locationURL === null) {
+							break;
+						}
+
+						// HTTP-redirect fetch step 5
+						if (request.counter >= request.follow) {
+							reject(new FetchError(`maximum redirect reached at: ${request.url}`, 'max-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 6 (counter increment)
+						// Create a new Request object.
+						const requestOptions = {
+							headers: new Headers(request.headers),
+							follow: request.follow,
+							counter: request.counter + 1,
+							agent: request.agent,
+							compress: request.compress,
+							method: request.method,
+							body: clone(request),
+							signal: request.signal,
+							size: request.size,
+							referrer: request.referrer,
+							referrerPolicy: request.referrerPolicy
+						};
+
+						// when forwarding sensitive headers like "Authorization",
+						// "WWW-Authenticate", and "Cookie" to untrusted targets,
+						// headers will be ignored when following a redirect to a domain
+						// that is not a subdomain match or exact match of the initial domain.
+						// For example, a redirect from "foo.com" to either "foo.com" or "sub.foo.com"
+						// will forward the sensitive headers, but a redirect to "bar.com" will not.
+						// headers will also be ignored when following a redirect to a domain using
+						// a different protocol. For example, a redirect from "https://foo.com" to "http://foo.com"
+						// will not forward the sensitive headers
+						if (!isDomainOrSubdomain(request.url, locationURL) || !isSameProtocol(request.url, locationURL)) {
+							for (const name of ['authorization', 'www-authenticate', 'cookie', 'cookie2']) {
+								requestOptions.headers.delete(name);
+							}
+						}
+
+						// HTTP-redirect fetch step 9
+						if (response_.statusCode !== 303 && request.body && options_.body instanceof external_node_stream_.Readable) {
+							reject(new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 11
+						if (response_.statusCode === 303 || ((response_.statusCode === 301 || response_.statusCode === 302) && request.method === 'POST')) {
+							requestOptions.method = 'GET';
+							requestOptions.body = undefined;
+							requestOptions.headers.delete('content-length');
+						}
+
+						// HTTP-redirect fetch step 14
+						const responseReferrerPolicy = parseReferrerPolicyFromHeader(headers);
+						if (responseReferrerPolicy) {
+							requestOptions.referrerPolicy = responseReferrerPolicy;
+						}
+
+						// HTTP-redirect fetch step 15
+						resolve(fetch(new Request(locationURL, requestOptions)));
+						finalize();
+						return;
+					}
+
+					default:
+						return reject(new TypeError(`Redirect option '${request.redirect}' is not a valid value of RequestRedirect`));
+				}
+			}
+
+			// Prepare response
+			if (signal) {
+				response_.once('end', () => {
+					signal.removeEventListener('abort', abortAndFinalize);
+				});
+			}
+
+			let body = (0,external_node_stream_.pipeline)(response_, new external_node_stream_.PassThrough(), error => {
+				if (error) {
+					reject(error);
+				}
+			});
+			// see https://github.com/nodejs/node/pull/29376
+			/* c8 ignore next 3 */
+			if (process.version < 'v12.10') {
+				response_.on('aborted', abortAndFinalize);
+			}
+
+			const responseOptions = {
+				url: request.url,
+				status: response_.statusCode,
+				statusText: response_.statusMessage,
+				headers,
+				size: request.size,
+				counter: request.counter,
+				highWaterMark: request.highWaterMark
+			};
+
+			// HTTP-network fetch step 12.1.1.3
+			const codings = headers.get('Content-Encoding');
+
+			// HTTP-network fetch step 12.1.1.4: handle content codings
+
+			// in following scenarios we ignore compression support
+			// 1. compression support is disabled
+			// 2. HEAD request
+			// 3. no Content-Encoding header
+			// 4. no content response (204)
+			// 5. content not modified response (304)
+			if (!request.compress || request.method === 'HEAD' || codings === null || response_.statusCode === 204 || response_.statusCode === 304) {
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// For Node v6+
+			// Be less strict when decoding compressed responses, since sometimes
+			// servers send slightly invalid responses that are still accepted
+			// by common browsers.
+			// Always using Z_SYNC_FLUSH is what cURL does.
+			const zlibOptions = {
+				flush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH,
+				finishFlush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH
+			};
+
+			// For gzip
+			if (codings === 'gzip' || codings === 'x-gzip') {
+				body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createGunzip(zlibOptions), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// For deflate
+			if (codings === 'deflate' || codings === 'x-deflate') {
+				// Handle the infamous raw deflate response from old servers
+				// a hack for old IIS and Apache servers
+				const raw = (0,external_node_stream_.pipeline)(response_, new external_node_stream_.PassThrough(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				raw.once('data', chunk => {
+					// See http://stackoverflow.com/questions/37519828
+					if ((chunk[0] & 0x0F) === 0x08) {
+						body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createInflate(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
+					} else {
+						body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createInflateRaw(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
+					}
+
+					response = new Response(body, responseOptions);
+					resolve(response);
+				});
+				raw.once('end', () => {
+					// Some old IIS servers return zero-length OK deflate responses, so
+					// 'data' is never emitted. See https://github.com/node-fetch/node-fetch/pull/903
+					if (!response) {
+						response = new Response(body, responseOptions);
+						resolve(response);
+					}
+				});
+				return;
+			}
+
+			// For br
+			if (codings === 'br') {
+				body = (0,external_node_stream_.pipeline)(body, external_node_zlib_namespaceObject.createBrotliDecompress(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// Otherwise, use response as-is
+			response = new Response(body, responseOptions);
+			resolve(response);
+		});
+
+		// eslint-disable-next-line promise/prefer-await-to-then
+		writeToStream(request_, request).catch(reject);
+	});
+}
+
+function fixResponseChunkedTransferBadEnding(request, errorCallback) {
+	const LAST_CHUNK = external_node_buffer_namespaceObject.Buffer.from('0\r\n\r\n');
+
+	let isChunkedTransfer = false;
+	let properLastChunkReceived = false;
+	let previousChunk;
+
+	request.on('response', response => {
+		const {headers} = response;
+		isChunkedTransfer = headers['transfer-encoding'] === 'chunked' && !headers['content-length'];
+	});
+
+	request.on('socket', socket => {
+		const onSocketClose = () => {
+			if (isChunkedTransfer && !properLastChunkReceived) {
+				const error = new Error('Premature close');
+				error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+				errorCallback(error);
+			}
+		};
+
+		const onData = buf => {
+			properLastChunkReceived = external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-5), LAST_CHUNK) === 0;
+
+			// Sometimes final 0-length chunk and end of message code are in separate packets
+			if (!properLastChunkReceived && previousChunk) {
+				properLastChunkReceived = (
+					external_node_buffer_namespaceObject.Buffer.compare(previousChunk.slice(-3), LAST_CHUNK.slice(0, 3)) === 0 &&
+					external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-2), LAST_CHUNK.slice(3)) === 0
+				);
+			}
+
+			previousChunk = buf;
+		};
+
+		socket.prependListener('close', onSocketClose);
+		socket.on('data', onData);
+
+		request.on('close', () => {
+			socket.removeListener('close', onSocketClose);
+			socket.removeListener('data', onData);
+		});
+	});
+}
 
 
 /***/ }),
