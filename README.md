@@ -383,7 +383,7 @@ Contributions are always welcome! Please make sure to read our [Contributor's Gu
 
 ## 📝 License
 
-This repository is licensed under the MIT License. You can find the license, the source code, and all assets are under [here](../LICENSE).
+This repository is licensed under the MIT License. You can find the license, the source code, and all assets are under [here](LICENSE).
 
 ---
 
