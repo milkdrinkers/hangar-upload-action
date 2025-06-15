@@ -12,15 +12,6 @@ interface FileInput {
   platforms: HangarPlatform[];
 }
 
-const apiToken = core.getInput("api_token", { required: true });
-const slug = core.getInput("slug", { required: true });
-const version = core.getInput("version", { required: true });
-const channel = core.getInput("channel", { required: true });
-const files = core.getInput("files", { required: true });
-const description = core.getInput("description");
-const pluginDependencies = core.getInput("plugin_dependencies");
-const platformDependencies = core.getInput("platform_dependencies");
-
 main().catch((err) => {
   console.error(err);
   core.setFailed(err.message);
@@ -34,6 +25,15 @@ interface HangarFile {
 }
 
 async function main() {
+  const apiToken = core.getInput("api_token", { required: true });
+  const slug = core.getInput("slug", { required: true });
+  const version = core.getInput("version", { required: true });
+  const channel = core.getInput("channel", { required: true });
+  const files = core.getInput("files", { required: true });
+  const description = core.getInput("description");
+  const pluginDependencies = core.getInput("plugin_dependencies");
+  const platformDependencies = core.getInput("platform_dependencies");
+
   const form = new FormData();
 
   const fileEntries: FileInput[] = JSON.parse(files);
