@@ -3,6 +3,7 @@ import { Logger } from "./logger.js";
 import { InputParser } from "./input-parser.js";
 import { FileProcessor } from "./file-processor.js";
 import { HangarClient } from "./hangar-client.js";
+import { VersionResolver } from "./version-resolver.js";
 import { VersionUpload, HangarError } from "./types.js";
 
 async function main(): Promise<void> {
@@ -21,13 +22,19 @@ async function main(): Promise<void> {
     const fileProcessor = new FileProcessor(logger);
     const { form, filesData } = await fileProcessor.processFiles(inputs.files);
 
+    const versionResolver = new VersionResolver(logger);
+    const resolvedPlatformDependencies =
+      await versionResolver.resolvePlatformDependencies(
+        inputs.platformDependencies,
+      );
+
     const versionUpload: VersionUpload = {
       version: inputs.version,
       channel: inputs.channel,
       description: inputs.description,
       files: filesData,
       pluginDependencies: inputs.pluginDependencies,
-      platformDependencies: inputs.platformDependencies,
+      platformDependencies: resolvedPlatformDependencies,
     };
 
     logger.debug("Version upload payload", versionUpload);

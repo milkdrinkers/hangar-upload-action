@@ -33,10 +33,8 @@ export class InputParser {
         "plugin_dependencies",
         {},
       );
-      const platformDependencies = this.parseJsonInput(
+      const platformDependencies = this.parsePlatformDependenciesInput(
         platformDependenciesInput,
-        "platform_dependencies",
-        {},
       );
 
       this.logger.debug("Successfully parsed all inputs");
@@ -148,6 +146,44 @@ export class InputParser {
     } catch (error) {
       throw new Error(
         `Failed to parse ${name} as JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  parsePlatformDependenciesInput(
+    input: string | undefined,
+  ): Record<string, string[]> {
+    if (!input) {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(input) as Record<string, unknown>;
+      const result: Record<string, string[]> = {};
+
+      for (const [platform, versions] of Object.entries(parsed)) {
+        if (!Array.isArray(versions)) {
+          throw new Error(
+            `Platform ${platform} must have an array of versions`,
+          );
+        }
+
+        const stringVersions = versions.map((v, i) => {
+          if (typeof v !== "string") {
+            throw new Error(
+              `Version at index ${i} for platform ${platform} must be a string`,
+            );
+          }
+          return v;
+        });
+
+        result[platform] = stringVersions;
+      }
+
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Failed to parse platform_dependencies: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

@@ -60,8 +60,18 @@ inputs:
 
   platform_dependencies:
     description: |
-      JSON object mapping platform names to version arrays
-      Example: {"PAPER": ["1.19", "1.20"], "VELOCITY": ["3.0.0"]}
+      JSON object mapping platform names to version patterns. Supports semver-like patterns for PAPER platform only.
+      PAPER versions are resolved from Mojang's official API.
+      
+      Supported patterns for PAPER:
+      - Exact: ["1.20.1", "1.19.4"]  
+      - Range: [">=1.19.0"]
+      - Patch: ["~1.20.0"] (1.20.x versions)
+      - Compatible: ["^1.19.0"] (1.19+ versions)
+      - Wildcard: ["1.20.x"]
+      
+      VELOCITY/WATERFALL use exact versions only:
+      Example: {"PAPER": [">=1.19.0"], "VELOCITY": ["3.2.0"], "WATERFALL": ["1.19"]}
     required: false
     default: '{}'
 
