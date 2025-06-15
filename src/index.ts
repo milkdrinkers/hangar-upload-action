@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   const logger = new Logger();
 
   try {
-    logger.info("Starting Hangar upload action");
+    logger.info("Starting Hangar Publish");
 
     const inputParser = new InputParser(logger);
     const inputs = inputParser.parseInputs();
