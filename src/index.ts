@@ -12,8 +12,8 @@ interface FileInput {
   platforms: HangarPlatform[];
 }
 
-main().catch((err) => {
-  console.error(err);
+await main().catch((err) => {
+  core.error(`Failed with error: ${err}`);
   core.setFailed(err.message);
 });
 
