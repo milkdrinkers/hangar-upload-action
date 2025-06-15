@@ -122,10 +122,18 @@ export class VersionResolver {
       matchingVersions.forEach((v) => resolvedVersions.add(v));
     }
 
-    // Convert to array and sort by semver (newest first)
+    // Convert to array and sort by semver (newest first), using normalized versions for comparison
     const result = Array.from(resolvedVersions).sort((a, b) => {
       try {
-        return semver.rcompare(a, b);
+        const normalizedA = this.normalizeVersionForSemver(a);
+        const normalizedB = this.normalizeVersionForSemver(b);
+
+        if (normalizedA && normalizedB) {
+          return semver.rcompare(normalizedA, normalizedB);
+        }
+
+        // Fallback to string comparison if normalization fails
+        return b.localeCompare(a);
       } catch (error) {
         // Fallback to string comparison if semver comparison fails
         this.logger.debug(
@@ -154,7 +162,12 @@ export class VersionResolver {
       if (semver.validRange(normalizedPattern)) {
         const matches = availableVersions.filter((version) => {
           try {
-            return semver.satisfies(version, normalizedPattern);
+            // Normalize the version for semver comparison, but keep the original
+            const normalizedVersion = this.normalizeVersionForSemver(version);
+            if (!normalizedVersion) {
+              return false;
+            }
+            return semver.satisfies(normalizedVersion, normalizedPattern);
           } catch (error) {
             // If semver.satisfies fails, the version might not be valid semver
             this.logger.debug(
@@ -165,7 +178,7 @@ export class VersionResolver {
         });
 
         if (matches.length > 0) {
-          return matches;
+          return matches; // Return original version strings, not normalized ones
         }
       }
     } catch (error) {
@@ -182,6 +195,23 @@ export class VersionResolver {
 
     this.logger.warning(`No matches found for version pattern: ${pattern}`);
     return [];
+  }
+
+  private normalizeVersionForSemver(version: string): string | null {
+    // If it's already valid semver, return as-is
+    if (semver.valid(version)) {
+      return version;
+    }
+
+    // Try to coerce to valid semver (handles cases like "1.20" -> "1.20.0")
+    const coerced = semver.coerce(version);
+    if (coerced) {
+      return coerced.version;
+    }
+
+    // If coercion fails, log and return null
+    this.logger.debug(`Could not normalize version to semver: ${version}`);
+    return null;
   }
 
   private normalizeVersionPattern(pattern: string): string {
@@ -225,17 +255,16 @@ export class VersionResolver {
 
       const projectData = (await response.json()) as PaperMCProjectResponse;
 
-      // Filter out pre-release versions and only include valid semver versions
+      // Filter out pre-release versions and only keep versions that can be normalized to semver
       const releaseVersions = projectData.versions
         .filter((v) => !v.includes("pre") && !v.includes("snapshot"))
-        .filter((v) => {
-          const isValid = semver.valid(v);
-          if (!isValid) {
-            this.logger.debug(`Filtering out invalid semver version: ${v}`);
-          }
-          return isValid;
-        })
-        .sort((a, b) => semver.rcompare(a, b)); // Sort newest first
+        .filter((v) => this.normalizeVersionForSemver(v) !== null) // Keep original but filter by normalizability
+        .sort((a, b) => {
+          // Sort using normalized versions for comparison, but keep originals
+          const normalizedA = this.normalizeVersionForSemver(a)!;
+          const normalizedB = this.normalizeVersionForSemver(b)!;
+          return semver.rcompare(normalizedA, normalizedB);
+        });
 
       this.cachedPaperMCVersions.set(cacheKey, releaseVersions);
       this.logger.debug(`Cached ${releaseVersions.length} ${project} versions`);

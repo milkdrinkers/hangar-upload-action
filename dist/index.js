@@ -43302,10 +43302,16 @@ class VersionResolver {
             const matchingVersions = this.getMatchingVersions(pattern, availableVersions);
             matchingVersions.forEach((v) => resolvedVersions.add(v));
         }
-        // Convert to array and sort by semver (newest first)
+        // Convert to array and sort by semver (newest first), using normalized versions for comparison
         const result = Array.from(resolvedVersions).sort((a, b) => {
             try {
-                return semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(a, b);
+                const normalizedA = this.normalizeVersionForSemver(a);
+                const normalizedB = this.normalizeVersionForSemver(b);
+                if (normalizedA && normalizedB) {
+                    return semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(normalizedA, normalizedB);
+                }
+                // Fallback to string comparison if normalization fails
+                return b.localeCompare(a);
             }
             catch (error) {
                 // Fallback to string comparison if semver comparison fails
@@ -43324,7 +43330,12 @@ class VersionResolver {
             if (semver__WEBPACK_IMPORTED_MODULE_0__.validRange(normalizedPattern)) {
                 const matches = availableVersions.filter((version) => {
                     try {
-                        return semver__WEBPACK_IMPORTED_MODULE_0__.satisfies(version, normalizedPattern);
+                        // Normalize the version for semver comparison, but keep the original
+                        const normalizedVersion = this.normalizeVersionForSemver(version);
+                        if (!normalizedVersion) {
+                            return false;
+                        }
+                        return semver__WEBPACK_IMPORTED_MODULE_0__.satisfies(normalizedVersion, normalizedPattern);
                     }
                     catch (error) {
                         // If semver.satisfies fails, the version might not be valid semver
@@ -43333,7 +43344,7 @@ class VersionResolver {
                     }
                 });
                 if (matches.length > 0) {
-                    return matches;
+                    return matches; // Return original version strings, not normalized ones
                 }
             }
         }
@@ -43347,6 +43358,20 @@ class VersionResolver {
         }
         this.logger.warning(`No matches found for version pattern: ${pattern}`);
         return [];
+    }
+    normalizeVersionForSemver(version) {
+        // If it's already valid semver, return as-is
+        if (semver__WEBPACK_IMPORTED_MODULE_0__.valid(version)) {
+            return version;
+        }
+        // Try to coerce to valid semver (handles cases like "1.20" -> "1.20.0")
+        const coerced = semver__WEBPACK_IMPORTED_MODULE_0__.coerce(version);
+        if (coerced) {
+            return coerced.version;
+        }
+        // If coercion fails, log and return null
+        this.logger.debug(`Could not normalize version to semver: ${version}`);
+        return null;
     }
     normalizeVersionPattern(pattern) {
         // Handle .x patterns by converting them to semver ranges
@@ -43374,17 +43399,16 @@ class VersionResolver {
                 throw new Error(`Failed to fetch ${project} versions: ${response.statusText}`);
             }
             const projectData = (await response.json());
-            // Filter out pre-release versions and only include valid semver versions
+            // Filter out pre-release versions and only keep versions that can be normalized to semver
             const releaseVersions = projectData.versions
                 .filter((v) => !v.includes("pre") && !v.includes("snapshot"))
-                .filter((v) => {
-                const isValid = semver__WEBPACK_IMPORTED_MODULE_0__.valid(v);
-                if (!isValid) {
-                    this.logger.debug(`Filtering out invalid semver version: ${v}`);
-                }
-                return isValid;
-            })
-                .sort((a, b) => semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(a, b)); // Sort newest first
+                .filter((v) => this.normalizeVersionForSemver(v) !== null) // Keep original but filter by normalizability
+                .sort((a, b) => {
+                // Sort using normalized versions for comparison, but keep originals
+                const normalizedA = this.normalizeVersionForSemver(a);
+                const normalizedB = this.normalizeVersionForSemver(b);
+                return semver__WEBPACK_IMPORTED_MODULE_0__.rcompare(normalizedA, normalizedB);
+            });
             this.cachedPaperMCVersions.set(cacheKey, releaseVersions);
             this.logger.debug(`Cached ${releaseVersions.length} ${project} versions`);
             return releaseVersions;
