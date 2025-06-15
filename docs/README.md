@@ -25,7 +25,29 @@ A GitHub Action to automate plugin releases to [Hangar](https://hangar.papermc.i
 
 ---
 
-## Configuration
+## 📦 Setup Instructions
+
+### 1. Get Your Hangar API Token
+
+1. Go to [Hangar Settings](https://hangar.papermc.io/auth/settings/api-keys)
+2. Create a new API key with upload permissions
+3. Copy the token
+
+### 2. Add Token to GitHub Secrets
+
+1. Go to your repository → Settings → Secrets and variables → Actions
+2. Click "New repository secret"
+3. Name: `HANGAR_TOKEN`
+4. Value: Your API token from step 1
+5. Click "Add secret"
+
+### 3. Add to Workflow
+
+Add `milkdrinkers/Hangar-Publish@v1` to your workflow with the desired configuration.
+
+---
+
+## ⚙️ Configuration
 
 ### Required Parameters
 
@@ -320,28 +342,6 @@ jobs:
 ```
 
 </details>
-
----
-
-## 📦 Setup Instructions
-
-### 1. Get Your Hangar API Token
-
-1. Go to [Hangar Settings](https://hangar.papermc.io/auth/settings/api-keys)
-2. Create a new API key with upload permissions
-3. Copy the token
-
-### 2. Add Token to GitHub Secrets
-
-1. Go to your repository → Settings → Secrets and variables → Actions
-2. Click "New repository secret"
-3. Name: `HANGAR_TOKEN`
-4. Value: Your API token from step 1
-5. Click "Add secret"
-
-### 3. Create the Workflow
-
-Create `.github/workflows/hangar-publish.yml` with your desired configuration.
 
 ---
 
